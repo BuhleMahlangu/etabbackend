@@ -44,6 +44,10 @@ app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/subjects', require('./routes/subjectRoutes'));
 app.use('/api/materials', require('./routes/materialRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
+// Add this line with other routes
+app.use('/api/enrollments', require('./routes/enrollmentRoutes'));
+app.use('/api/deadlines', require('./routes/deadlineRoutes'));
+app.use('/api/notifications', require('./routes/notificationRoutes'));
 
 app.use((err, req, res, next) => {
   console.error('Error:', err.stack);

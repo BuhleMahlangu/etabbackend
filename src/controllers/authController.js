@@ -2,29 +2,133 @@ const bcrypt = require('bcryptjs');
 const { generateToken } = require('../config/auth');
 const db = require('../config/database');
 
+// Get subjects for a specific grade
+const getSubjectsForGrade = async (grade) => {
+  const result = await db.query(
+    'SELECT * FROM subjects WHERE $1 = ANY(applicable_grades) AND is_active = true',
+    [grade]
+  );
+  return result.rows;
+};
+
+// Auto-enroll learner in grade subjects
+const autoEnrollLearner = async (learnerId, grade, academicYear) => {
+  const subjects = await getSubjectsForGrade(grade);
+  
+  for (const subject of subjects) {
+    // Check if already enrolled
+    const existing = await db.query(
+      'SELECT id FROM enrollments WHERE learner_id = $1 AND subject_id = $2 AND academic_year = $3',
+      [learnerId, subject.id, academicYear]
+    );
+    
+    if (existing.rows.length === 0) {
+      await db.query(
+        `INSERT INTO enrollments (learner_id, subject_id, grade, academic_year, status)
+         VALUES ($1, $2, $3, $4, 'active')`,
+        [learnerId, subject.id, grade, academicYear]
+      );
+    }
+  }
+  
+  return subjects.length;
+};
+
 const register = async (req, res) => {
   try {
-    const { email, password, firstName, lastName, role } = req.body;
+    const { email, password, firstName, lastName, role, grade, subjects } = req.body;
     
+    // Validation
     if ((role === 'teacher' || role === 'admin') && req.user?.role !== 'admin') {
-      return res.status(403).json({ success: false, message: 'Only admins can create this role' });
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only admins can create teacher or admin accounts' 
+      });
     }
 
+    if (role === 'learner' && !grade) {
+      return res.status(400).json({
+        success: false,
+        message: 'Grade is required for learners'
+      });
+    }
+
+    if (role === 'teacher' && (!subjects || subjects.length === 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one subject is required for teachers'
+      });
+    }
+
+    // Check if email exists
     const existing = await db.query('SELECT id FROM users WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       return res.status(400).json({ success: false, message: 'Email already registered' });
     }
 
+    // Hash password
     const salt = await bcrypt.genSalt(12);
     const passwordHash = await bcrypt.hash(password, salt);
 
+    // Insert user
     const result = await db.query(
-      `INSERT INTO users (email, password_hash, first_name, last_name, role) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, email, first_name, last_name, role`,
-      [email, passwordHash, firstName, lastName, role || 'learner']
+      `INSERT INTO users (email, password_hash, first_name, last_name, role, current_grade, teacher_subjects) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) 
+       RETURNING id, email, first_name, last_name, role, current_grade`,
+      [
+        email, 
+        passwordHash, 
+        firstName, 
+        lastName, 
+        role || 'learner',
+        role === 'learner' ? grade : null,
+        role === 'teacher' ? subjects : null
+      ]
     );
 
-    res.status(201).json({ success: true, data: result.rows[0] });
+    const user = result.rows[0];
+
+    // Auto-enroll learner in subjects
+    if (role === 'learner') {
+      const academicYear = new Date().getFullYear().toString();
+      const enrolledCount = await autoEnrollLearner(user.id, grade, academicYear);
+      
+      // Create notification
+      await db.query(
+        `INSERT INTO notifications (user_id, title, message, type)
+         VALUES ($1, $2, $3, 'general')`,
+        [
+          user.id,
+          'Welcome to E-tab!',
+          `You have been automatically enrolled in ${enrolledCount} subjects for ${grade}.`
+        ]
+      );
+    }
+
+    // Create teacher assignments
+    if (role === 'teacher' && subjects) {
+      const academicYear = new Date().getFullYear().toString();
+      for (const subjectId of subjects) {
+        await db.query(
+          `INSERT INTO teacher_assignments (teacher_id, subject_id, academic_year)
+           VALUES ($1, $2, $3)`,
+          [user.id, subjectId, academicYear]
+        );
+      }
+    }
+
+    res.status(201).json({ 
+      success: true, 
+      message: 'Account created successfully',
+      data: {
+        id: user.id,
+        email: user.email,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        role: user.role,
+        grade: user.current_grade
+      }
+    });
   } catch (error) {
     console.error('Registration error:', error);
     res.status(500).json({ success: false, message: 'Registration failed' });
@@ -36,7 +140,9 @@ const login = async (req, res) => {
     const { email, password } = req.body;
 
     const result = await db.query(
-      'SELECT id, email, password_hash, first_name, last_name, role, is_active FROM users WHERE email = $1',
+      `SELECT id, email, password_hash, first_name, last_name, role, 
+              current_grade, is_active, teacher_subjects
+       FROM users WHERE email = $1`,
       [email]
     );
 
@@ -45,6 +151,7 @@ const login = async (req, res) => {
     }
 
     const user = result.rows[0];
+
     if (!user.is_active) {
       return res.status(401).json({ success: false, message: 'Account deactivated' });
     }
@@ -59,7 +166,8 @@ const login = async (req, res) => {
     const token = generateToken({
       userId: user.id,
       email: user.email,
-      role: user.role
+      role: user.role,
+      grade: user.current_grade
     });
 
     res.json({
@@ -70,7 +178,9 @@ const login = async (req, res) => {
         email: user.email,
         firstName: user.first_name,
         lastName: user.last_name,
-        role: user.role
+        role: user.role,
+        grade: user.current_grade,
+        teacherSubjects: user.teacher_subjects
       }
     });
   } catch (error) {
@@ -82,10 +192,46 @@ const login = async (req, res) => {
 const getMe = async (req, res) => {
   try {
     const result = await db.query(
-      'SELECT id, email, first_name, last_name, role, created_at FROM users WHERE id = $1',
+      `SELECT id, email, first_name, last_name, role, current_grade, 
+              teacher_subjects, created_at 
+       FROM users WHERE id = $1`,
       [req.user.userId]
     );
-    res.json({ success: true, data: result.rows[0] });
+    
+    // Get enrolled subjects for learners
+    let enrolledSubjects = [];
+    if (result.rows[0].role === 'learner') {
+      const enrollments = await db.query(
+        `SELECT e.*, s.name as subject_name, s.code as subject_code
+         FROM enrollments e
+         JOIN subjects s ON e.subject_id = s.id
+         WHERE e.learner_id = $1 AND e.academic_year = $2`,
+        [req.user.userId, new Date().getFullYear().toString()]
+      );
+      enrolledSubjects = enrollments.rows;
+    }
+    
+    // Get teaching assignments for teachers
+    let teachingAssignments = [];
+    if (result.rows[0].role === 'teacher') {
+      const assignments = await db.query(
+        `SELECT ta.*, s.name as subject_name, s.code as subject_code
+         FROM teacher_assignments ta
+         JOIN subjects s ON ta.subject_id = s.id
+         WHERE ta.teacher_id = $1 AND ta.academic_year = $2`,
+        [req.user.userId, new Date().getFullYear().toString()]
+      );
+      teachingAssignments = assignments.rows;
+    }
+
+    res.json({ 
+      success: true, 
+      data: {
+        ...result.rows[0],
+        enrolledSubjects,
+        teachingAssignments
+      }
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch user' });
   }
@@ -95,4 +241,4 @@ const logout = async (req, res) => {
   res.json({ success: true, message: 'Logged out' });
 };
 
-module.exports = { register, login, getMe, logout };
+module.exports = { register, login, getMe, logout, getSubjectsForGrade, autoEnrollLearner };

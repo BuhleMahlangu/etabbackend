@@ -1,9 +1,55 @@
 const db = require('../config/database');
 
+// Get all subjects with optional grade filter
 const getAll = async (req, res) => {
   try {
+    const { grade, phase } = req.query;
+    let query = 'SELECT * FROM subjects WHERE is_active = true';
+    let params = [];
+    let paramCount = 0;
+
+    if (grade) {
+      paramCount++;
+      query += ` AND $${paramCount} = ANY(applicable_grades)`;
+      params.push(grade);
+    }
+
+    if (phase) {
+      paramCount++;
+      query += ` AND phase = $${paramCount}`;
+      params.push(phase);
+    }
+
+    query += ' ORDER BY phase, name';
+
+    const result = await db.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch subjects' });
+  }
+};
+
+// Get subjects for a specific grade (for registration)
+const getByGrade = async (req, res) => {
+  try {
+    const { grade } = req.params;
     const result = await db.query(
-      'SELECT s.*, u.first_name || \' \' || u.last_name as created_by_name FROM subjects s LEFT JOIN users u ON s.created_by = u.id WHERE s.is_active = true'
+      'SELECT * FROM subjects WHERE $1 = ANY(applicable_grades) AND is_active = true ORDER BY name',
+      [grade]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch subjects' });
+  }
+};
+
+// Get subjects by phase
+const getByPhase = async (req, res) => {
+  try {
+    const { phase } = req.params;
+    const result = await db.query(
+      'SELECT * FROM subjects WHERE phase = $1 AND is_active = true ORDER BY name',
+      [phase]
     );
     res.json({ success: true, data: result.rows });
   } catch (error) {
@@ -25,10 +71,11 @@ const getById = async (req, res) => {
 
 const create = async (req, res) => {
   try {
-    const { code, name, description, credits, department } = req.body;
+    const { code, name, description, phase, applicableGrades, credits, isCompulsory, department } = req.body;
     const result = await db.query(
-      'INSERT INTO subjects (code, name, description, credits, department, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [code, name, description, credits, department, req.user.userId]
+      `INSERT INTO subjects (code, name, description, phase, applicable_grades, credits, is_compulsory, department, created_by) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [code, name, description, phase, applicableGrades, credits, isCompulsory, department, req.user.userId]
     );
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -38,10 +85,12 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   try {
-    const { code, name, description, credits, department, isActive } = req.body;
+    const { code, name, description, phase, applicableGrades, credits, isCompulsory, department, isActive } = req.body;
     const result = await db.query(
-      'UPDATE subjects SET code = $1, name = $2, description = $3, credits = $4, department = $5, is_active = $6, updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
-      [code, name, description, credits, department, isActive, req.params.id]
+      `UPDATE subjects SET code = $1, name = $2, description = $3, phase = $4, applicable_grades = $5, 
+       credits = $6, is_compulsory = $7, department = $8, is_active = $9, updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $10 RETURNING *`,
+      [code, name, description, phase, applicableGrades, credits, isCompulsory, department, isActive, req.params.id]
     );
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -58,4 +107,4 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { getAll, getById, create, update, delete: remove };
+module.exports = { getAll, getById, getByGrade, getByPhase, create, update, delete: remove };
