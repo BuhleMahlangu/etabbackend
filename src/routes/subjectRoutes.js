@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const subjectController = require('../controllers/subjectController');
 const { authenticate } = require('../middleware/authMiddleware');
-const { isAdmin, isTeacher } = require('../middleware/roleMiddleware');
+const { isAdmin } = require('../middleware/roleMiddleware');
 
 router.get('/', authenticate, subjectController.getAll);
 router.get('/:id', authenticate, subjectController.getById);

@@ -1,5 +1,5 @@
 const db = require('../config/database');
-const { deleteFromCloudinary, cloudinary } = require('../config/multer-cloudinary');
+const { deleteFromCloudinary } = require('../config/multer-cloudinary');
 
 const getAll = async (req, res) => {
   try {
