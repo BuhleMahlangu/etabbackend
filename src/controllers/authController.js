@@ -70,18 +70,46 @@ const register = async (req, res) => {
     const salt = await bcrypt.genSalt(12);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    // Insert user
+    // Lookup grade info from grades table
+    let gradeId = null;
+    let gradeName = null;
+    let gradeLevel = null;
+    
+    if (role === 'learner' && grade) {
+      const gradeResult = await db.query(
+        'SELECT id, name, level FROM grades WHERE name = $1',
+        [grade]
+      );
+      
+      if (gradeResult.rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid grade selected'
+        });
+      }
+      
+      gradeId = gradeResult.rows[0].id;        // UUID
+      gradeName = gradeResult.rows[0].name;    // "Grade 10"
+      gradeLevel = gradeResult.rows[0].level;  // INTEGER: 10
+    }
+
+    // Insert user with proper integer current_grade (gradeLevel)
     const result = await db.query(
-      `INSERT INTO users (email, password_hash, first_name, last_name, role, current_grade, teacher_subjects) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) 
-       RETURNING id, email, first_name, last_name, role, current_grade`,
+      `INSERT INTO users (
+        email, password_hash, first_name, last_name, role, 
+        grade_id, grade, current_grade, teacher_subjects
+      ) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
+      RETURNING id, email, first_name, last_name, role, grade, current_grade`,
       [
         email, 
         passwordHash, 
         firstName, 
         lastName, 
         role || 'learner',
-        role === 'learner' ? grade : null,
+        gradeId,        // UUID -> grade_id column
+        gradeName,      // "Grade 10" -> grade column
+        gradeLevel,     // INTEGER (1-12) -> current_grade column
         role === 'teacher' ? subjects : null
       ]
     );
@@ -117,16 +145,26 @@ const register = async (req, res) => {
       }
     }
 
+    // GENERATE TOKEN FOR NEW USER
+    const token = generateToken({
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      grade: user.current_grade  // Integer grade level in token
+    });
+
     res.status(201).json({ 
       success: true, 
       message: 'Account created successfully',
+      token,
       data: {
         id: user.id,
         email: user.email,
         firstName: user.first_name,
         lastName: user.last_name,
         role: user.role,
-        grade: user.current_grade
+        grade: user.grade,           // "Grade 10" for display
+        currentGrade: user.current_grade  // Integer: 10
       }
     });
   } catch (error) {
@@ -141,7 +179,7 @@ const login = async (req, res) => {
 
     const result = await db.query(
       `SELECT id, email, password_hash, first_name, last_name, role, 
-              current_grade, is_active, teacher_subjects
+              grade, current_grade, is_active, teacher_subjects
        FROM users WHERE email = $1`,
       [email]
     );
@@ -167,7 +205,7 @@ const login = async (req, res) => {
       userId: user.id,
       email: user.email,
       role: user.role,
-      grade: user.current_grade
+      grade: user.current_grade  // Integer in token
     });
 
     res.json({
@@ -179,7 +217,8 @@ const login = async (req, res) => {
         firstName: user.first_name,
         lastName: user.last_name,
         role: user.role,
-        grade: user.current_grade,
+        grade: user.grade,           // "Grade 10"
+        currentGrade: user.current_grade,  // Integer: 10
         teacherSubjects: user.teacher_subjects
       }
     });
@@ -192,11 +231,15 @@ const login = async (req, res) => {
 const getMe = async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT id, email, first_name, last_name, role, current_grade, 
-              teacher_subjects, created_at 
+      `SELECT id, email, first_name, last_name, role, grade, current_grade, 
+              teacher_subjects, created_at, last_login
        FROM users WHERE id = $1`,
       [req.user.userId]
     );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
     
     // Get enrolled subjects for learners
     let enrolledSubjects = [];
@@ -233,6 +276,7 @@ const getMe = async (req, res) => {
       }
     });
   } catch (error) {
+    console.error('GetMe error:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch user' });
   }
 };
