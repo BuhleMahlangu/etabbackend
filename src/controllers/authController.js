@@ -36,27 +36,35 @@ const autoEnrollLearner = async (learnerId, grade, academicYear) => {
 
 const register = async (req, res) => {
   try {
-    const { email, password, firstName, lastName, role, grade, subjects } = req.body;
+    const { 
+      email, 
+      password, 
+      firstName, 
+      lastName, 
+      role, 
+      grade, 
+      subjects,
+      teacherInfo
+    } = req.body;
     
-    // Validation
-    if ((role === 'teacher' || role === 'admin') && req.user?.role !== 'admin') {
+    // ============================================
+    // FIXED: Block teacher/admin registration through auth route
+    // Teachers must use /api/teachers/register (which has proper admin auth)
+    // ============================================
+    if (role === 'teacher' || role === 'admin') {
       return res.status(403).json({ 
         success: false, 
-        message: 'Only admins can create teacher or admin accounts' 
+        message: 'Only admins can create teacher or admin accounts. Please use /api/teachers/register endpoint.' 
       });
     }
 
-    if (role === 'learner' && !grade) {
+    // Only allow learner registration through this endpoint
+    const userRole = role || 'learner';
+    
+    if (userRole === 'learner' && !grade) {
       return res.status(400).json({
         success: false,
         message: 'Grade is required for learners'
-      });
-    }
-
-    if (role === 'teacher' && (!subjects || subjects.length === 0)) {
-      return res.status(400).json({
-        success: false,
-        message: 'At least one subject is required for teachers'
       });
     }
 
@@ -70,12 +78,12 @@ const register = async (req, res) => {
     const salt = await bcrypt.genSalt(12);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    // Lookup grade info from grades table
     let gradeId = null;
     let gradeName = null;
     let gradeLevel = null;
-    
-    if (role === 'learner' && grade) {
+
+    // Lookup grade info for learners
+    if (userRole === 'learner' && grade) {
       const gradeResult = await db.query(
         'SELECT id, name, level FROM grades WHERE name = $1',
         [grade]
@@ -88,69 +96,60 @@ const register = async (req, res) => {
         });
       }
       
-      gradeId = gradeResult.rows[0].id;        // UUID
-      gradeName = gradeResult.rows[0].name;    // "Grade 10"
-      gradeLevel = gradeResult.rows[0].level;  // INTEGER: 10
+      gradeId = gradeResult.rows[0].id;
+      gradeName = gradeResult.rows[0].name;
+      gradeLevel = gradeResult.rows[0].level;
     }
 
-    // Insert user with proper integer current_grade (gradeLevel)
+    // Insert user - ONLY learners through this route
     const result = await db.query(
       `INSERT INTO users (
         email, password_hash, first_name, last_name, role, 
-        grade_id, grade, current_grade, teacher_subjects
+        grade_id, grade, current_grade, 
+        employee_number, qualification, specialization, years_experience, bio,
+        is_active
       ) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, true) 
       RETURNING id, email, first_name, last_name, role, grade, current_grade`,
       [
         email, 
         passwordHash, 
         firstName, 
         lastName, 
-        role || 'learner',
-        gradeId,        // UUID -> grade_id column
-        gradeName,      // "Grade 10" -> grade column
-        gradeLevel,     // INTEGER (1-12) -> current_grade column
-        role === 'teacher' ? subjects : null
+        userRole,
+        gradeId,
+        gradeName,
+        gradeLevel,
+        null, // employee_number - not for learners
+        null, // qualification - not for learners
+        null, // specialization - not for learners
+        0,    // years_experience - not for learners
+        null  // bio - not for learners
       ]
     );
 
     const user = result.rows[0];
+    const academicYear = new Date().getFullYear().toString();
 
-    // Auto-enroll learner in subjects
-    if (role === 'learner') {
-      const academicYear = new Date().getFullYear().toString();
-      const enrolledCount = await autoEnrollLearner(user.id, grade, academicYear);
-      
-      // Create notification
-      await db.query(
-        `INSERT INTO notifications (user_id, title, message, type)
-         VALUES ($1, $2, $3, 'general')`,
-        [
-          user.id,
-          'Welcome to E-tab!',
-          `You have been automatically enrolled in ${enrolledCount} subjects for ${grade}.`
-        ]
-      );
-    }
+    // Handle learner auto-enrollment
+    const enrolledCount = await autoEnrollLearner(user.id, grade, academicYear);
+    
+    await db.query(
+      `INSERT INTO notifications (user_id, title, message, type)
+       VALUES ($1, $2, $3, 'general')`,
+      [
+        user.id,
+        'Welcome to E-tab!',
+        `You have been automatically enrolled in ${enrolledCount} subjects for ${grade}.`
+      ]
+    );
 
-    // Create teacher assignments
-    if (role === 'teacher' && subjects) {
-      const academicYear = new Date().getFullYear().toString();
-      for (const subjectId of subjects) {
-        await db.query(
-          `INSERT INTO teacher_assignments (teacher_id, subject_id, academic_year)
-           VALUES ($1, $2, $3)`,
-          [user.id, subjectId, academicYear]
-        );
-      }
-    }
-
-    // GENERATE TOKEN FOR NEW USER
+    // Generate token
     const token = generateToken({
       userId: user.id,
       email: user.email,
       role: user.role,
-      grade: user.current_grade  // Integer grade level in token
+      grade: user.current_grade
     });
 
     res.status(201).json({ 
@@ -163,8 +162,8 @@ const register = async (req, res) => {
         firstName: user.first_name,
         lastName: user.last_name,
         role: user.role,
-        grade: user.grade,           // "Grade 10" for display
-        currentGrade: user.current_grade  // Integer: 10
+        grade: user.grade,
+        currentGrade: user.current_grade
       }
     });
   } catch (error) {
@@ -205,7 +204,7 @@ const login = async (req, res) => {
       userId: user.id,
       email: user.email,
       role: user.role,
-      grade: user.current_grade  // Integer in token
+      grade: user.current_grade
     });
 
     res.json({
@@ -217,8 +216,8 @@ const login = async (req, res) => {
         firstName: user.first_name,
         lastName: user.last_name,
         role: user.role,
-        grade: user.grade,           // "Grade 10"
-        currentGrade: user.current_grade,  // Integer: 10
+        grade: user.grade,
+        currentGrade: user.current_grade,
         teacherSubjects: user.teacher_subjects
       }
     });
@@ -232,7 +231,7 @@ const getMe = async (req, res) => {
   try {
     const result = await db.query(
       `SELECT id, email, first_name, last_name, role, grade, current_grade, 
-              teacher_subjects, created_at, last_login
+              teacher_subjects, created_at 
        FROM users WHERE id = $1`,
       [req.user.userId]
     );
@@ -254,13 +253,14 @@ const getMe = async (req, res) => {
       enrolledSubjects = enrollments.rows;
     }
     
-    // Get teaching assignments for teachers
+    // Get teaching assignments for teachers - using subject_id
     let teachingAssignments = [];
     if (result.rows[0].role === 'teacher') {
       const assignments = await db.query(
-        `SELECT ta.*, s.name as subject_name, s.code as subject_code
+        `SELECT ta.*, m.name as subject_name, m.code as subject_code, g.name as grade_name
          FROM teacher_assignments ta
-         JOIN subjects s ON ta.subject_id = s.id
+         JOIN modules m ON ta.subject_id = m.id
+         JOIN grades g ON ta.grade_id = g.id
          WHERE ta.teacher_id = $1 AND ta.academic_year = $2`,
         [req.user.userId, new Date().getFullYear().toString()]
       );

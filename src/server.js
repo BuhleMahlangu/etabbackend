@@ -19,6 +19,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const enrollmentRoutes = require('./routes/enrollmentRoutes');
 const deadlineRoutes = require('./routes/deadlineRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const teacherRoutes = require('./routes/teacherRoutes');
 
 const app = express();
 
@@ -74,6 +75,20 @@ app.use((req, res, next) => {
   next();
 });
 
+// ============================================
+// ADDED: Cloudinary configuration check
+// ============================================
+const checkCloudinaryConfig = () => {
+  const required = ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'];
+  const missing = required.filter(key => !process.env[key]);
+  
+  if (missing.length > 0) {
+    console.warn(`⚠️  Missing Cloudinary config: ${missing.join(', ')}`);
+    return false;
+  }
+  return true;
+};
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
@@ -83,9 +98,42 @@ app.get('/health', (req, res) => {
   });
 });
 
+// ============================================
+// ADDED: Cloudinary status check endpoint
+// ============================================
+app.get('/api/health/cloudinary', (req, res) => {
+  const isConfigured = checkCloudinaryConfig();
+  res.json({ 
+    status: isConfigured ? 'OK' : 'WARNING', 
+    cloudinary: isConfigured ? 'Configured' : 'Missing environment variables',
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || null
+  });
+});
+
 // Test route
 app.get('/api/test', (req, res) => {
   res.json({ message: 'Backend is working', timestamp: new Date() });
+});
+
+// ============================================
+// ADDED: Database connection test
+// ============================================
+const db = require('./config/database');
+app.get('/api/health/db', async (req, res) => {
+  try {
+    const result = await db.query('SELECT NOW()');
+    res.json({ 
+      status: 'OK', 
+      database: 'Connected',
+      serverTime: result.rows[0].now 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'ERROR', 
+      database: 'Disconnected',
+      error: error.message 
+    });
+  }
 });
 
 // API Routes
@@ -97,6 +145,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/deadlines', deadlineRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/teachers', teacherRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -118,6 +167,10 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
+
+// Check Cloudinary on startup
+const cloudinaryReady = checkCloudinaryConfig();
+
 app.listen(PORT, () => {
   console.log(`
   🎓 E-tab Server Running
@@ -126,6 +179,7 @@ app.listen(PORT, () => {
   Environment: ${process.env.NODE_ENV || 'development'}
   JWT Secret: ${process.env.JWT_SECRET ? '✅ Loaded' : '❌ MISSING!'}
   Database: ${process.env.DB_NAME || 'Not configured'}
+  Cloudinary: ${cloudinaryReady ? '✅ Configured' : '⚠️  Check config'}
   Rate Limit: ${process.env.NODE_ENV === 'development' ? '⚠️ SKIPPED (DEV)' : '✅ 1000 req/15min'}
   =======================
   API: http://localhost:${PORT}/api

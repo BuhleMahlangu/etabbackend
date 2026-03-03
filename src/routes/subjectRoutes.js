@@ -6,17 +6,17 @@ const db = require('../config/database');
 // Helper: Get default cover image by department
 function getDefaultCoverImage(department) {
   const images = {
-    'Mathematics': 'https://images.unsplash.com/photo-1635070041078-e363dbe005cb?w=400 ',
-    'Science': 'https://images.unsplash.com/photo-1636466497217-26a8cbeaf0aa?w=400 ',
-    'Languages': 'https://images.unsplash.com/photo-1455390582262-044cdead277a?w=400 ',
-    'Technology': 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=400 ',
-    'Arts': 'https://images.unsplash.com/photo-1460661419201-fd4cecdf8a8b?w=400 ',
-    'Humanities': 'https://images.unsplash.com/photo-1524995997946-a1c2e315a42f?w=400 ',
-    'Business': 'https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?w=400 ',
-    'Services': 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=400 ',
-    'Life Orientation': 'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?w=400 '
+    'Mathematics': 'https://images.unsplash.com/photo-1635070041078-e363dbe005cb?w=400',
+    'Science': 'https://images.unsplash.com/photo-1636466497217-26a8cbeaf0aa?w=400',
+    'Languages': 'https://images.unsplash.com/photo-1455390582262-044cdead277a?w=400',
+    'Technology': 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=400',
+    'Arts': 'https://images.unsplash.com/photo-1460661419201-fd4cecdf8a8b?w=400',
+    'Humanities': 'https://images.unsplash.com/photo-1524995997946-a1c2e315a42f?w=400',
+    'Business': 'https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?w=400',
+    'Services': 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=400',
+    'Life Orientation': 'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?w=400'
   };
-  return images[department] || 'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?w=400 ';
+  return images[department] || 'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?w=400';
 }
 
 // Small helper to validate UUID-ish strings (basic)
@@ -143,8 +143,10 @@ router.get('/available-grades', async (req, res) => {
   try {
     const result = await db.query(`
       SELECT 
+        g.id,
         g.name as grade,
         g.phase,
+        g.level,
         COUNT(CASE WHEN gm.is_compulsory THEN 1 END) as compulsory_count,
         COUNT(CASE WHEN NOT gm.is_compulsory THEN 1 END) as optional_count,
         COUNT(*) as total_modules
@@ -165,6 +167,87 @@ router.get('/available-grades', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching available grades'
+    });
+  }
+});
+
+// ============================================
+// GET SUBJECTS BY GRADE (For Teacher Registration)
+// ============================================
+router.get('/grade-subjects/:gradeId', async (req, res) => {
+  try {
+    const { gradeId } = req.params;
+
+    // Validate UUID
+    if (!/^[0-9a-fA-F-]{36}$/.test(gradeId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid grade ID format'
+      });
+    }
+
+    // Get grade info
+    const gradeResult = await db.query(
+      'SELECT id, name, level FROM grades WHERE id = $1::uuid',
+      [gradeId]
+    );
+
+    if (gradeResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Grade not found'
+      });
+    }
+
+    const grade = gradeResult.rows[0];
+
+    // Get subjects with learner enrollment count
+    const subjectsResult = await db.query(`
+      SELECT 
+        m.id,
+        m.code,
+        m.name,
+        m.description,
+        m.department,
+        m.credits,
+        gm.is_compulsory,
+        COUNT(DISTINCT lm.learner_id) as learner_count
+      FROM modules m
+      JOIN grade_modules gm ON m.id = gm.module_id
+      LEFT JOIN learner_modules lm ON m.id = lm.module_id 
+        AND lm.grade_id = $1::uuid 
+        AND lm.status = 'active'
+      WHERE gm.grade_id = $1::uuid
+      AND m.is_active = true
+      GROUP BY m.id, m.code, m.name, m.description, m.department, m.credits, gm.is_compulsory
+      ORDER BY gm.is_compulsory DESC, m.department, m.name
+    `, [gradeId]);
+
+    res.status(200).json({
+      success: true,
+      grade: {
+        id: grade.id,
+        name: grade.name,
+        level: grade.level
+      },
+      subjects: subjectsResult.rows.map(s => ({
+        id: s.id,
+        code: s.code,
+        name: s.name,
+        description: s.description,
+        department: s.department,
+        credits: s.credits,
+        isCompulsory: s.is_compulsory,
+        learnerCount: parseInt(s.learner_count)
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error fetching grade subjects:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching subjects',
+      error: error.message
     });
   }
 });
