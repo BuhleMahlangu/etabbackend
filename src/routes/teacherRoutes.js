@@ -54,7 +54,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         AND lm.grade_id = g.id 
         AND lm.status = 'active'
       LEFT JOIN materials mat ON mat.subject_id = m.id 
-        AND mat.teacher_id = ta.teacher_id
+        AND mat.uploaded_by = $1::uuid
       WHERE ta.teacher_id = $1::uuid
       AND ta.academic_year = $2
       AND ta.is_active = true
@@ -79,7 +79,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         COUNT(*) as total_materials,
         COUNT(CASE WHEN created_at > NOW() - INTERVAL '7 days' THEN 1 END) as recent_uploads
       FROM materials
-      WHERE teacher_id = $1::uuid
+      WHERE uploaded_by = $1::uuid
     `, [teacherId]);
 
     // Get pending assignments to grade
@@ -89,22 +89,20 @@ router.get('/dashboard', authenticate, async (req, res) => {
       JOIN assignments a ON s.assignment_id = a.id
       WHERE a.teacher_id = $1::uuid
       AND s.status = 'submitted'
-      AND s.grade IS NULL
+      AND s.marks_obtained IS NULL
     `, [teacherId]);
 
-    // Get recent activity (last 5 materials uploaded)
+    // Get recent activity (last 5 materials uploaded) - FIXED: removed grade_id join
     const recentActivity = await db.query(`
       SELECT 
         m.id,
         m.title,
         m.file_type,
         m.created_at,
-        mod.name as subject_name,
-        g.name as grade_name
+        mod.name as subject_name
       FROM materials m
       JOIN modules mod ON m.subject_id = mod.id
-      JOIN grades g ON m.grade_id = g.id
-      WHERE m.teacher_id = $1::uuid
+      WHERE m.uploaded_by = $1::uuid
       ORDER BY m.created_at DESC
       LIMIT 5
     `, [teacherId]);
@@ -168,7 +166,6 @@ router.get('/dashboard', authenticate, async (req, res) => {
           title: a.title,
           fileType: a.file_type,
           subjectName: a.subject_name,
-          gradeName: a.grade_name,
           createdAt: a.created_at
         }))
       }

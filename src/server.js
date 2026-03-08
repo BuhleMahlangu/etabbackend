@@ -20,6 +20,7 @@ const enrollmentRoutes = require('./routes/enrollmentRoutes');
 const deadlineRoutes = require('./routes/deadlineRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const teacherRoutes = require('./routes/teacherRoutes');
+const teacherLearnerRoutes = require('./routes/teacherLearnerRoutes');
 
 const app = express();
 
@@ -146,6 +147,7 @@ app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/deadlines', deadlineRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/teachers', teacherRoutes);
+app.use('/api/teacher-learners', teacherLearnerRoutes);
 
 // 404 handler
 app.use((req, res) => {

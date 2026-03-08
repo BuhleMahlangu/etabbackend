@@ -3,32 +3,67 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-// DEBUG: Log the status (remove this after fixing)
-console.log('🔐 JWT Configuration:');
-console.log('  JWT_SECRET exists:', JWT_SECRET ? '✅ Yes' : '❌ NO - MISSING!');
-console.log('  JWT_SECRET length:', JWT_SECRET ? JWT_SECRET.length : 0);
-console.log('  JWT_EXPIRES_IN:', JWT_EXPIRES_IN);
+// ============================================
+// JWT Configuration Validation
+// ============================================
 
-// Validate that JWT_SECRET is set
-if (!JWT_SECRET) {
-  console.error('❌ FATAL ERROR: JWT_SECRET environment variable is not set!');
-  console.error('   Please add JWT_SECRET to your .env file');
-  console.error('   Example: JWT_SECRET=your_super_secret_random_string_here');
-  
-  // For development only: use a fallback (REMOVE IN PRODUCTION!)
-  if (process.env.NODE_ENV === 'development') {
-    console.warn('⚠️  DEVELOPMENT MODE: Using temporary fallback secret');
-    console.warn('   DO NOT USE THIS IN PRODUCTION!');
-  } else {
-    throw new Error('JWT_SECRET must be defined in environment variables');
+const validateConfig = () => {
+  console.log('🔐 JWT Configuration:');
+  console.log('  JWT_SECRET exists:', JWT_SECRET ? '✅ Yes' : '❌ NO - MISSING!');
+  console.log('  JWT_SECRET length:', JWT_SECRET ? JWT_SECRET.length : 0);
+  console.log('  JWT_EXPIRES_IN:', JWT_EXPIRES_IN);
+
+  if (!JWT_SECRET) {
+    console.error('❌ FATAL ERROR: JWT_SECRET environment variable is not set!');
+    console.error('   Please add JWT_SECRET to your .env file');
+    console.error('   Example: JWT_SECRET=your_super_secret_random_string_here');
+    
+    // Development fallback (REMOVE IN PRODUCTION!)
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('⚠️  DEVELOPMENT MODE: Using temporary fallback secret');
+      console.warn('   DO NOT USE THIS IN PRODUCTION!');
+      return 'temporary_dev_secret_change_immediately';
+    } else {
+      throw new Error('JWT_SECRET must be defined in environment variables');
+    }
   }
-}
+
+  // Validate secret length (minimum 32 characters for security)
+  if (JWT_SECRET.length < 32) {
+    console.warn('⚠️  WARNING: JWT_SECRET should be at least 32 characters for security');
+  }
+
+  return JWT_SECRET;
+};
+
+const SECRET = validateConfig();
+
+// ============================================
+// Token Generation
+// ============================================
 
 const generateToken = (payload) => {
-  const secret = JWT_SECRET || 'temporary_dev_secret_change_immediately';
-  
   try {
-    const token = jwt.sign(payload, secret, { expiresIn: JWT_EXPIRES_IN });
+    // Ensure required fields are present
+    if (!payload.userId && !payload.id) {
+      throw new Error('Payload must contain userId or id');
+    }
+
+    const token = jwt.sign(
+      {
+        userId: payload.userId || payload.id,
+        email: payload.email,
+        role: payload.role,
+        ...payload // Include any additional fields
+      }, 
+      SECRET, 
+      { 
+        expiresIn: JWT_EXPIRES_IN,
+        issuer: 'e-tab-platform',
+        audience: 'e-tab-users'
+      }
+    );
+
     console.log('✅ Token generated for user:', payload.userId || payload.id);
     return token;
   } catch (error) {
@@ -37,71 +72,126 @@ const generateToken = (payload) => {
   }
 };
 
+// ============================================
+// Token Verification
+// ============================================
+
 const verifyToken = (token) => {
-  const secret = JWT_SECRET || 'temporary_dev_secret_change_immediately';
-  
-  // DEBUG: Log what we received
-  console.log('🔍 verifyToken called');
-  console.log('  Token type:', typeof token);
-  console.log('  Token length:', token?.length);
-  console.log('  First 50 chars:', token?.substring(0, 50));
-  
-  // Check if token is valid format before trying to verify
+  // Initial validation
   if (!token || typeof token !== 'string') {
     throw new Error('Token must be a non-empty string');
   }
-  
-  // Clean the token
+
   let cleanToken = token.trim();
-  
-  // Remove quotes if present (common issue with localStorage)
+
+  // Remove quotes if present (common localStorage issue)
   if (cleanToken.startsWith('"') && cleanToken.endsWith('"')) {
     cleanToken = cleanToken.replace(/^"|"$/g, '');
-    console.log('  Removed quotes from token');
   }
-  
-  // Remove Bearer prefix if somehow still present
-  if (cleanToken.startsWith('Bearer ')) {
+
+  // Remove Bearer prefix if present
+  if (cleanToken.toLowerCase().startsWith('bearer ')) {
     cleanToken = cleanToken.substring(7).trim();
-    console.log('  Removed Bearer prefix from token');
   }
-  
-  // Check JWT structure (should have 3 parts)
+
+  // Validate JWT structure
   const parts = cleanToken.split('.');
-  console.log('  JWT parts count:', parts.length);
-  
   if (parts.length !== 3) {
-    console.error('  ❌ Invalid JWT format - expected 3 parts, got', parts.length);
     throw new Error(`Invalid JWT format: expected 3 parts, got ${parts.length}`);
   }
-  
-  // Try to decode payload for debugging (without verification)
+
+  // Verify and decode
   try {
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
-    console.log('  Token payload (decoded):', {
-      userId: payload.userId || payload.id,
-      email: payload.email,
-      role: payload.role,
-      iat: payload.iat,
-      exp: payload.exp
+    const decoded = jwt.verify(cleanToken, SECRET, {
+      issuer: 'e-tab-platform',
+      audience: 'e-tab-users'
     });
-  } catch (e) {
-    console.log('  Could not decode payload:', e.message);
-  }
-  
-  // Now verify with secret
-  try {
-    const decoded = jwt.verify(cleanToken, secret);
-    console.log('✅ Token verified successfully for user:', decoded.userId || decoded.id);
+
+    console.log('✅ Token verified for user:', decoded.userId);
     return decoded;
   } catch (error) {
     console.error('❌ Token verification failed:', error.message);
-    console.error('  Token was:', cleanToken.substring(0, 50) + '...');
+    
+    // Provide specific error messages
+    if (error.name === 'TokenExpiredError') {
+      throw new Error('Token has expired. Please log in again.');
+    }
+    if (error.name === 'JsonWebTokenError') {
+      throw new Error('Invalid token format.');
+    }
+    
     throw error;
   }
 };
 
+// ============================================
+// Token Decoding (without verification - for debugging)
+// ============================================
+
+const decodeToken = (token) => {
+  try {
+    return jwt.decode(token);
+  } catch (error) {
+    console.error('❌ Token decode failed:', error.message);
+    return null;
+  }
+};
+
+// ============================================
+// Middleware for Express
+// ============================================
+
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Access denied. No token provided.' 
+    });
+  }
+
+  try {
+    const decoded = verifyToken(token);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(403).json({ 
+      success: false, 
+      message: error.message || 'Invalid or expired token' 
+    });
+  }
+};
+
+// ============================================
+// Role-based Authorization Middleware
+// ============================================
+
+const authorize = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required' 
+      });
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ 
+        success: false, 
+        message: `Access denied. Required role: ${allowedRoles.join(' or ')}` 
+      });
+    }
+
+    next();
+  };
+};
+
 module.exports = {
   generateToken,
-  verifyToken
+  verifyToken,
+  decodeToken,
+  authenticateToken,
+  authorize
 };
