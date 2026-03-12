@@ -3,37 +3,103 @@ const { deleteFromCloudinary } = require('../config/multer-cloudinary');
 
 const getAll = async (req, res) => {
   try {
-    const { subjectId, page = 1, limit = 10 } = req.query;
+    const { subjectId, gradeId, page = 1, limit = 10 } = req.query;
     const offset = (page - 1) * limit;
     
     let query = `
       SELECT m.*, u.first_name || ' ' || u.last_name as uploaded_by_name,
-             s.name as subject_name
+             mod.code as subject_code, mod.name as subject_name, mod.department,
+             g.name as grade_name, g.level as grade_level
       FROM materials m
       JOIN users u ON m.uploaded_by = u.id
-      JOIN subjects s ON m.subject_id = s.id
+      JOIN modules mod ON m.subject_id = mod.id
+      LEFT JOIN grades g ON m.grade_id = g.id
       WHERE 1=1
     `;
     let params = [];
     let paramCount = 0;
 
+    // If learner, only show published materials for their enrolled subjects
     if (req.user.role === 'learner') {
       query += ` AND m.is_published = true AND m.subject_id IN (
-        SELECT subject_id FROM enrollments WHERE learner_id = $${++paramCount} AND status = 'active'
+        SELECT module_id FROM learner_modules WHERE learner_id = $${++paramCount} AND status = 'active'
       )`;
       params.push(req.user.userId);
     }
 
+    // Filter by subject if provided (for subject site context)
     if (subjectId) {
       query += ` AND m.subject_id = $${++paramCount}`;
       params.push(subjectId);
+    }
+
+    // Filter by grade if provided
+    if (gradeId) {
+      query += ` AND m.grade_id = $${++paramCount}`;
+      params.push(gradeId);
+    }
+
+    // If teacher, only show their assigned subjects
+    if (req.user.role === 'teacher') {
+      query += ` AND m.subject_id IN (
+        SELECT subject_id FROM teacher_assignments 
+        WHERE teacher_id = $${++paramCount} AND is_active = true AND academic_year = '2026'
+      )`;
+      params.push(req.user.userId);
     }
 
     query += ` ORDER BY m.created_at DESC LIMIT $${++paramCount} OFFSET $${++paramCount}`;
     params.push(limit, offset);
 
     const result = await db.query(query, params);
-    res.json({ success: true, data: result.rows });
+    
+    // Get total count for pagination
+    let countQuery = `
+      SELECT COUNT(*) FROM materials m
+      JOIN modules mod ON m.subject_id = mod.id
+      WHERE 1=1
+    `;
+    let countParams = [];
+    let countParamCount = 0;
+
+    if (req.user.role === 'learner') {
+      countQuery += ` AND m.is_published = true AND m.subject_id IN (
+        SELECT module_id FROM learner_modules WHERE learner_id = $${++countParamCount} AND status = 'active'
+      )`;
+      countParams.push(req.user.userId);
+    }
+
+    if (subjectId) {
+      countQuery += ` AND m.subject_id = $${++countParamCount}`;
+      countParams.push(subjectId);
+    }
+
+    if (gradeId) {
+      countQuery += ` AND m.grade_id = $${++countParamCount}`;
+      countParams.push(gradeId);
+    }
+
+    if (req.user.role === 'teacher') {
+      countQuery += ` AND m.subject_id IN (
+        SELECT subject_id FROM teacher_assignments 
+        WHERE teacher_id = $${++countParamCount} AND is_active = true AND academic_year = '2026'
+      )`;
+      countParams.push(req.user.userId);
+    }
+
+    const countResult = await db.query(countQuery, countParams);
+    const totalCount = parseInt(countResult.rows[0].count);
+
+    res.json({ 
+      success: true, 
+      data: result.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalCount,
+        totalPages: Math.ceil(totalCount / limit)
+      }
+    });
   } catch (error) {
     console.error('Get materials error:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch materials' });
@@ -42,28 +108,29 @@ const getAll = async (req, res) => {
 
 const upload = async (req, res) => {
   try {
-    const { subjectId, title, description, weekNumber, isPublished } = req.body;
+    const { subjectId, gradeId, title, description, weekNumber, isPublished } = req.body;
     
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
 
+    // Verify teacher is assigned to this subject/grade
     if (req.user.role === 'teacher') {
       const assignment = await db.query(
-        'SELECT id FROM teacher_assignments WHERE teacher_id = $1 AND subject_id = $2',
-        [req.user.userId, subjectId]
+        'SELECT id, is_primary FROM teacher_assignments WHERE teacher_id = $1 AND subject_id = $2 AND grade_id = $3 AND is_active = true',
+        [req.user.userId, subjectId, gradeId]
       );
       if (assignment.rows.length === 0) {
-        return res.status(403).json({ success: false, message: 'Not assigned to this subject' });
+        return res.status(403).json({ success: false, message: 'Not assigned to this subject/grade combination' });
       }
     }
 
     const result = await db.query(
-      `INSERT INTO materials (subject_id, uploaded_by, title, description, file_url, file_type, 
+      `INSERT INTO materials (subject_id, grade_id, uploaded_by, title, description, file_url, file_type, 
         file_size_bytes, week_number, is_published, cloudinary_public_id, cloudinary_resource_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
       [
-        subjectId, req.user.userId, title, description, req.file.path, 
+        subjectId, gradeId, req.user.userId, title, description, req.file.path, 
         req.file.format || 'unknown', req.file.size || 0, weekNumber || null, 
         isPublished === 'true', req.file.filename, req.file.resource_type || 'raw'
       ]
@@ -80,8 +147,12 @@ const getById = async (req, res) => {
   try {
     const { id } = req.params;
     const result = await db.query(
-      `SELECT m.*, u.first_name || ' ' || u.last_name as uploaded_by_name
-       FROM materials m JOIN users u ON m.uploaded_by = u.id WHERE m.id = $1`,
+      `SELECT m.*, u.first_name || ' ' || u.last_name as uploaded_by_name,
+              mod.code as subject_code, mod.name as subject_name
+       FROM materials m 
+       JOIN users u ON m.uploaded_by = u.id 
+       JOIN modules mod ON m.subject_id = mod.id
+       WHERE m.id = $1`,
       [id]
     );
 
@@ -89,9 +160,22 @@ const getById = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Material not found' });
     }
 
+    // Check access permissions
+    const material = result.rows[0];
+    if (req.user.role === 'learner') {
+      const enrollment = await db.query(
+        'SELECT 1 FROM learner_modules WHERE learner_id = $1 AND module_id = $2 AND status = \'active\'',
+        [req.user.userId, material.subject_id]
+      );
+      if (enrollment.rows.length === 0 || !material.is_published) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+      }
+    }
+
     await db.query('UPDATE materials SET view_count = view_count + 1 WHERE id = $1', [id]);
-    res.json({ success: true, data: result.rows[0] });
+    res.json({ success: true, data: material });
   } catch (error) {
+    console.error('Get material error:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch material' });
   }
 };
@@ -101,12 +185,21 @@ const update = async (req, res) => {
     const { id } = req.params;
     const { title, description, weekNumber, isPublished } = req.body;
 
-    const existing = await db.query('SELECT uploaded_by FROM materials WHERE id = $1', [id]);
+    const existing = await db.query('SELECT uploaded_by, subject_id FROM materials WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Not found' });
     }
 
-    if (req.user.role !== 'admin' && existing.rows[0].uploaded_by !== req.user.userId) {
+    // Check permissions
+    if (req.user.role === 'teacher') {
+      const assignment = await db.query(
+        'SELECT 1 FROM teacher_assignments WHERE teacher_id = $1 AND subject_id = $2 AND is_active = true',
+        [req.user.userId, existing.rows[0].subject_id]
+      );
+      if (assignment.rows.length === 0) {
+        return res.status(403).json({ success: false, message: 'Not authorized for this subject' });
+      }
+    } else if (req.user.role !== 'admin' && existing.rows[0].uploaded_by !== req.user.userId) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -118,6 +211,7 @@ const update = async (req, res) => {
 
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
+    console.error('Update error:', error);
     res.status(500).json({ success: false, message: 'Update failed' });
   }
 };
@@ -126,7 +220,7 @@ const remove = async (req, res) => {
   try {
     const { id } = req.params;
     const existing = await db.query(
-      'SELECT uploaded_by, cloudinary_public_id, cloudinary_resource_type FROM materials WHERE id = $1',
+      'SELECT uploaded_by, subject_id, cloudinary_public_id, cloudinary_resource_type FROM materials WHERE id = $1',
       [id]
     );
 
@@ -134,7 +228,16 @@ const remove = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Not found' });
     }
 
-    if (req.user.role !== 'admin' && existing.rows[0].uploaded_by !== req.user.userId) {
+    // Check permissions
+    if (req.user.role === 'teacher') {
+      const assignment = await db.query(
+        'SELECT 1 FROM teacher_assignments WHERE teacher_id = $1 AND subject_id = $2 AND is_active = true',
+        [req.user.userId, existing.rows[0].subject_id]
+      );
+      if (assignment.rows.length === 0) {
+        return res.status(403).json({ success: false, message: 'Not authorized for this subject' });
+      }
+    } else if (req.user.role !== 'admin' && existing.rows[0].uploaded_by !== req.user.userId) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -146,6 +249,7 @@ const remove = async (req, res) => {
     await db.query('DELETE FROM materials WHERE id = $1', [id]);
     res.json({ success: true, message: 'Deleted' });
   } catch (error) {
+    console.error('Delete error:', error);
     res.status(500).json({ success: false, message: 'Delete failed' });
   }
 };

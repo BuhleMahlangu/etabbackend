@@ -1,6 +1,11 @@
 const db = require('../config/database');
 
 /**
+ * Get current academic year
+ */
+const getAcademicYear = () => '2026';
+
+/**
  * Middleware to ensure teachers can only access learners in their assigned grades/subjects
  * This validates that the teacher has an active assignment for the learner's grade AND subject
  */
@@ -14,7 +19,7 @@ const validateTeacherLearnerAccess = async (req, res, next) => {
       return next();
     }
 
-    const academicYear = new Date().getFullYear().toString();
+    const academicYear = getAcademicYear();
 
     // Build query based on what's provided
     let query = `
@@ -75,13 +80,43 @@ const validateTeacherLearnerAccess = async (req, res, next) => {
 };
 
 /**
+ * Get all subjects taught by a teacher (for subject site switching)
+ */
+const getTeacherSubjects = async (teacherId) => {
+  const academicYear = getAcademicYear();
+  
+  const result = await db.query(`
+    SELECT DISTINCT
+      m.id as subject_id,
+      m.code as subject_code,
+      m.name as subject_name,
+      m.department,
+      g.id as grade_id,
+      g.name as grade_name,
+      g.level as grade_level,
+      ta.is_primary as is_primary
+    FROM teacher_assignments ta
+    JOIN modules m ON ta.subject_id = m.id
+    JOIN grades g ON ta.grade_id = g.id
+    WHERE ta.teacher_id = $1::uuid
+    AND ta.academic_year = $2
+    AND ta.is_active = true
+    ORDER BY m.department, m.name, g.level
+  `, [teacherId, academicYear]);
+
+  return result.rows;
+};
+
+/**
  * Get all learners that a teacher is eligible to teach
  * (learners in teacher's grades who are taking teacher's subjects)
+ * FILTERED by selected subject if provided
  */
 const getTeacherLearners = async (teacherId, options = {}) => {
   const { gradeId, subjectId, search, page = 1, limit = 20 } = options;
-  const academicYear = new Date().getFullYear().toString();
+  const academicYear = getAcademicYear();
   
+  // If subjectId is provided, only show learners for that specific subject
   let query = `
     SELECT DISTINCT
       u.id as learner_id,
@@ -113,14 +148,15 @@ const getTeacherLearners = async (teacherId, options = {}) => {
   const params = [teacherId, academicYear];
   let paramCount = 2;
 
-  if (gradeId) {
-    query += ` AND g.id = $${++paramCount}::uuid`;
-    params.push(gradeId);
-  }
-
+  // Filter by specific subject if provided (for subject site context)
   if (subjectId) {
     query += ` AND m.id = $${++paramCount}::uuid`;
     params.push(subjectId);
+  }
+
+  if (gradeId) {
+    query += ` AND g.id = $${++paramCount}::uuid`;
+    params.push(gradeId);
   }
 
   if (search) {
@@ -161,7 +197,7 @@ const getTeacherLearners = async (teacherId, options = {}) => {
  * Check if teacher can teach a specific learner in a specific subject
  */
 const canTeachLearner = async (teacherId, learnerId, subjectId) => {
-  const academicYear = new Date().getFullYear().toString();
+  const academicYear = getAcademicYear();
   
   const result = await db.query(`
     SELECT 1 
@@ -182,6 +218,7 @@ const canTeachLearner = async (teacherId, learnerId, subjectId) => {
 
 module.exports = {
   validateTeacherLearnerAccess,
+  getTeacherSubjects,
   getTeacherLearners,
   canTeachLearner
 };

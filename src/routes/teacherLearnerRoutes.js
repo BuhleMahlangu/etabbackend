@@ -1,11 +1,73 @@
 const express = require('express');
 const router = express.Router();
 const { authenticate } = require('../middleware/authMiddleware');
-const { validateTeacherLearnerAccess, getTeacherLearners, canTeachLearner } = require('../middleware/teacherLearnerMiddleware');
+const { validateTeacherLearnerAccess, getTeacherSubjects, getTeacherLearners, canTeachLearner } = require('../middleware/teacherLearnerMiddleware');
 const db = require('../config/database');
 
 // ============================================
+// GET ALL SUBJECTS FOR CURRENT TEACHER (for subject site switching)
+// ============================================
+router.get('/my-subjects', authenticate, async (req, res) => {
+  try {
+    const teacherId = req.user.userId;
+
+    // Verify user is teacher
+    const userCheck = await db.query(
+      'SELECT role FROM users WHERE id = $1::uuid',
+      [teacherId]
+    );
+
+    if (userCheck.rows[0]?.role !== 'teacher') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only teachers can access this endpoint'
+      });
+    }
+
+    const subjects = await getTeacherSubjects(teacherId);
+
+    // Group by subject for easier frontend consumption
+    const groupedBySubject = subjects.reduce((acc, row) => {
+      const subjectKey = row.subject_id;
+      if (!acc[subjectKey]) {
+        acc[subjectKey] = {
+          subjectId: row.subject_id,
+          subjectCode: row.subject_code,
+          subjectName: row.subject_name,
+          department: row.department,
+          isPrimary: row.is_primary,
+          grades: []
+        };
+      }
+      acc[subjectKey].grades.push({
+        gradeId: row.grade_id,
+        gradeName: row.grade_name,
+        gradeLevel: row.grade_level
+      });
+      return acc;
+    }, {});
+
+    res.status(200).json({
+      success: true,
+      data: {
+        subjects: Object.values(groupedBySubject),
+        totalSubjects: subjects.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching teacher subjects:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching subjects',
+      error: error.message
+    });
+  }
+});
+
+// ============================================
 // GET ALL LEARNERS FOR CURRENT TEACHER
+// Optional: filter by subjectId (subject site context)
 // ============================================
 router.get('/my-learners', authenticate, async (req, res) => {
   try {
@@ -27,7 +89,7 @@ router.get('/my-learners', authenticate, async (req, res) => {
 
     const result = await getTeacherLearners(teacherId, {
       gradeId,
-      subjectId,
+      subjectId, // This filters learners by specific subject if provided
       search,
       page: parseInt(page) || 1,
       limit: parseInt(limit) || 20
@@ -75,7 +137,12 @@ router.get('/my-learners', authenticate, async (req, res) => {
           ...grade,
           subjects: Object.values(grade.subjects)
         })),
-        pagination: result.pagination
+        pagination: result.pagination,
+        // Include current subject context if provided
+        currentSubject: subjectId ? {
+          subjectId,
+          // You could add subject details here if needed
+        } : null
       }
     });
 
@@ -183,10 +250,10 @@ router.get('/learner/:learnerId',
     try {
       const { learnerId } = req.params;
       const teacherId = req.user.userId;
-      const academicYear = new Date().getFullYear().toString();
+      const { subjectId } = req.query; // Optional: filter by specific subject
+      const academicYear = '2026';
 
-      // Get learner details with subjects they share with this teacher
-      const result = await db.query(`
+      let query = `
         SELECT 
           u.id,
           u.first_name,
@@ -201,7 +268,7 @@ router.get('/learner/:learnerId',
           m.name as subject_name,
           m.department,
           ta.is_primary as is_primary_teacher,
-          lm.enrollment_date
+          lm.enrolled_at as enrollment_date
         FROM users u
         JOIN learner_modules lm ON u.id = lm.learner_id
         JOIN grades g ON lm.grade_id = g.id
@@ -214,8 +281,20 @@ router.get('/learner/:learnerId',
         AND ta.is_active = true
         AND lm.status = 'active'
         AND u.role = 'learner'
-        ORDER BY m.department, m.name
-      `, [learnerId, teacherId, academicYear]);
+      `;
+      
+      const params = [learnerId, teacherId, academicYear];
+      let paramCount = 3;
+
+      // Filter by specific subject if provided
+      if (subjectId) {
+        query += ` AND m.id = $${++paramCount}::uuid`;
+        params.push(subjectId);
+      }
+
+      query += ` ORDER BY m.department, m.name`;
+
+      const result = await db.query(query, params);
 
       if (result.rows.length === 0) {
         return res.status(404).json({

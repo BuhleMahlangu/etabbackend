@@ -120,7 +120,7 @@ const getAllTeachers = async (req, res) => {
       WHERE u.role = 'teacher'
       GROUP BY u.id
       ORDER BY u.created_at DESC
-    `, [new Date().getFullYear().toString()]);
+    `, ['2026']);
 
     // Get pending teachers (has all the extra fields)
     const pendingResult = await db.query(`
@@ -170,7 +170,7 @@ const getAllTeachers = async (req, res) => {
 };
 
 // ============================================
-// APPROVE A TEACHER - WITH VALIDATION
+// APPROVE A TEACHER - AUTO-CREATES ASSIGNMENTS (FIXED)
 // ============================================
 const approveTeacher = async (req, res) => {
   try {
@@ -190,12 +190,12 @@ const approveTeacher = async (req, res) => {
     }
 
     const teacher = pending.rows[0];
-    const academicYear = new Date().getFullYear().toString();
+    const academicYear = '2026'; // Use your academic year
 
     await db.query('BEGIN');
 
     try {
-      // INSERT ONLY columns that exist in your users table
+      // Create user account
       const userResult = await db.query(`
         INSERT INTO users (
           email, password_hash, first_name, last_name, role, is_active, created_at, updated_at
@@ -211,108 +211,76 @@ const approveTeacher = async (req, res) => {
       const newTeacher = userResult.rows[0];
       console.log('✅ [ADMIN] Created user account:', newTeacher.id);
 
-      // Create teacher assignments from the assignments JSON
+      // Parse assignments from JSON
       const assignments = typeof teacher.assignments === 'string' 
         ? JSON.parse(teacher.assignments) 
         : teacher.assignments || [];
 
       let assignmentCount = 0;
-      let skippedCount = 0;
 
+      // Loop through each grade assignment
       for (const assignment of assignments) {
         const { gradeId, subjectIds, isPrimary } = assignment;
         
-        // Skip if gradeId is missing
-        if (!gradeId) {
-          console.log('⚠️ [ADMIN] Skipping assignment - missing gradeId');
-          skippedCount++;
+        if (!gradeId || !subjectIds || !Array.isArray(subjectIds)) {
+          console.log('⚠️ [ADMIN] Skipping invalid assignment:', assignment);
           continue;
         }
 
-        // Validate grade exists
-        const gradeCheck = await db.query('SELECT id FROM grades WHERE id = $1', [gradeId]);
-        if (gradeCheck.rows.length === 0) {
-          console.log(`⚠️ [ADMIN] Skipping assignment - grade not found: ${gradeId}`);
-          skippedCount++;
-          continue;
-        }
-
-        // Skip if subjectIds is empty or not an array
-        if (!subjectIds || !Array.isArray(subjectIds) || subjectIds.length === 0) {
-          console.log('⚠️ [ADMIN] Skipping assignment - no subjects provided');
-          skippedCount++;
-          continue;
-        }
-
+        // Insert each subject for this grade
         for (const subjectId of subjectIds) {
-          // Skip empty subject IDs
-          if (!subjectId) {
-            console.log('⚠️ [ADMIN] Skipping empty subjectId');
-            skippedCount++;
-            continue;
-          }
-
-          // Validate subject exists before inserting
-          const subjectCheck = await db.query('SELECT id FROM subjects WHERE id = $1', [subjectId]);
-          
-          if (subjectCheck.rows.length === 0) {
-            console.log(`⚠️ [ADMIN] Skipping invalid subject_id: ${subjectId}`);
-            skippedCount++;
-            continue;
-          }
+          if (!subjectId) continue;
 
           try {
             await db.query(`
               INSERT INTO teacher_assignments (
-                teacher_id, grade_id, subject_id, academic_year, is_primary, is_active
-              ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, true)
-              ON CONFLICT (teacher_id, subject_id, academic_year) DO UPDATE
-              SET grade_id = $2::uuid, is_primary = $5, is_active = true
-            `, [newTeacher.id, gradeId, subjectId, academicYear, isPrimary || false]);
+                id, teacher_id, grade_id, subject_id, academic_year, is_primary, is_active, assigned_at
+              ) VALUES (gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, $4, $5, true, NOW())
+            `, [
+              newTeacher.id,
+              gradeId,
+              subjectId,
+              academicYear,
+              isPrimary || false
+            ]);
             assignmentCount++;
+            console.log(`✅ [ADMIN] Created assignment: grade=${gradeId}, subject=${subjectId}`);
           } catch (insertErr) {
-            console.log(`⚠️ [ADMIN] Failed to insert assignment for subject ${subjectId}:`, insertErr.message);
-            skippedCount++;
+            // If duplicate, just log and continue
+            if (insertErr.code === '23505') {
+              console.log(`⚠️ [ADMIN] Assignment already exists for subject ${subjectId}`);
+            } else {
+              console.log(`⚠️ [ADMIN] Failed to insert: ${insertErr.message}`);
+            }
           }
         }
       }
       
-      console.log(`✅ [ADMIN] Created ${assignmentCount} assignments, skipped ${skippedCount}`);
+      console.log(`✅ [ADMIN] Created ${assignmentCount} assignments`);
 
-      // Update pending record - REMOVED user_id column (doesn't exist)
+      // Update pending status
       await db.query(`
         UPDATE pending_teachers 
         SET status = 'approved', reviewed_at = NOW(), reviewed_by = $1
         WHERE id = $2
       `, [adminId, pendingId]);
 
-      // Create welcome notification
-      await db.query(`
-        INSERT INTO notifications (user_id, title, message, type)
-        VALUES ($1, $2, $3, 'success')
-      `, [
-        newTeacher.id,
-        'Registration Approved!',
-        'Your teacher registration has been approved. You can now log in and start teaching.'
-      ]);
-
       await db.query('COMMIT');
-      console.log('✅ [ADMIN] Teacher approved successfully:', teacher.email);
 
       res.json({
         success: true,
-        message: 'Teacher approved and account created successfully',
+        message: 'Teacher approved successfully',
         teacher: {
           id: newTeacher.id,
           email: newTeacher.email,
           firstName: newTeacher.first_name,
-          lastName: newTeacher.last_name
+          lastName: newTeacher.last_name,
+          assignmentsCreated: assignmentCount
         }
       });
 
     } catch (err) {
       await db.query('ROLLBACK');
-      console.error('❌ [ADMIN] Transaction failed:', err);
       throw err;
     }
 
