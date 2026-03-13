@@ -21,6 +21,8 @@ const deadlineRoutes = require('./routes/deadlineRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const teacherRoutes = require('./routes/teacherRoutes');
 const teacherLearnerRoutes = require('./routes/teacherLearnerRoutes');
+const announcementRoutes = require('./routes/announcementRoutes');
+const quizRoutes = require('./routes/quizRoutes');
 
 const app = express();
 
@@ -148,6 +150,8 @@ app.use('/api/deadlines', deadlineRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/teachers', teacherRoutes);
 app.use('/api/teacher-learners', teacherLearnerRoutes);
+app.use('/api/announcements', announcementRoutes);
+app.use('/api/quizzes', quizRoutes);
 
 // 404 handler
 app.use((req, res) => {

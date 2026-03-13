@@ -148,4 +148,162 @@ const getReport = async (req, res) => {
   }
 };
 
-module.exports = { updateMarks, processGradeProgression, getReport };
+// Get learner's enrolled subjects (for materials page) - FIXED to use learner_modules
+const getMySubjects = async (req, res) => {
+  try {
+    const learnerId = req.user.userId;
+
+    const result = await db.query(`
+      SELECT 
+        m.id as subject_id,
+        m.name as subject_name,
+        m.code as subject_code,
+        m.description,
+        g.name as grade,
+        g.id as grade_id,
+        g.name as grade_name,
+        lm.status,
+        lm.progress_percent
+      FROM learner_modules lm
+      JOIN modules m ON lm.module_id = m.id
+      JOIN grades g ON lm.grade_id = g.id
+      WHERE lm.learner_id = $1 
+      AND lm.status = 'active'
+      ORDER BY m.name
+    `, [learnerId]);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows.map(row => ({
+        id: row.subject_id,
+        subject_id: row.subject_id,
+        name: row.subject_name,
+        code: row.subject_code,
+        description: row.description,
+        grade: row.grade,
+        grade_id: row.grade_id,
+        grade_name: row.grade_name,
+        status: row.status,
+        progress: row.progress_percent,
+        teacher: 'Not assigned'
+      }))
+    });
+  } catch (error) {
+    console.error('Get my subjects error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch subjects' });
+  }
+};
+
+// Get enrollment history for FET phase (Grades 10-12) - FIXED to use learner_modules
+const getEnrollmentHistory = async (req, res) => {
+  try {
+    const learnerId = req.user.userId;
+    const { phase } = req.query; // 'fet' for grades 10-12, 'all' for all history
+
+    // Get user's grade info to determine current grade
+    const userResult = await db.query(
+      'SELECT grade_id, current_grade FROM users WHERE id = $1',
+      [learnerId]
+    );
+    const userGradeId = userResult.rows[0]?.grade_id;
+
+    let gradeFilter = '';
+    
+    if (phase === 'fet') {
+      // Filter for FET phase grades (10-12)
+      gradeFilter = `AND g.level >= 10 AND g.level <= 12`;
+    }
+
+    // Query learner_modules (the correct table for current system)
+    const result = await db.query(`
+      SELECT 
+        m.id as subject_id,
+        m.name as subject_name,
+        m.code as subject_code,
+        m.description,
+        g.name as grade,
+        g.id as grade_id,
+        g.level as grade_level,
+        lm.status,
+        lm.progress_percent,
+        lm.enrolled_at,
+        CASE WHEN lm.grade_id = $2 THEN true ELSE false END as is_current
+      FROM learner_modules lm
+      JOIN modules m ON lm.module_id = m.id
+      JOIN grades g ON lm.grade_id = g.id
+      WHERE lm.learner_id = $1 
+      ${gradeFilter}
+      AND lm.status = 'active'
+      ORDER BY g.level DESC, m.name
+    `, [learnerId, userGradeId]);
+
+    // Group by grade for easier frontend display
+    const groupedByGrade = result.rows.reduce((acc, row) => {
+      const gradeKey = row.grade;
+      if (!acc[gradeKey]) {
+        acc[gradeKey] = {
+          grade: gradeKey,
+          academic_year: new Date().getFullYear().toString(),
+          subjects: []
+        };
+      }
+      acc[gradeKey].subjects.push({
+        id: row.subject_id,
+        subject_id: row.subject_id,
+        name: row.subject_name,
+        code: row.subject_code,
+        description: row.description,
+        academic_year: new Date().getFullYear().toString(),
+        status: row.status,
+        is_current: row.is_current,
+        progress: row.progress_percent,
+        marks: {
+          term1: null,
+          term2: null,
+          term3: null,
+          term4: null,
+          final: null,
+          passed: null
+        },
+        teacher: 'Not assigned'
+      });
+      return acc;
+    }, {});
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: {
+        allSubjects: result.rows.map(row => ({
+          id: row.subject_id,
+          subject_id: row.subject_id,
+          name: row.subject_name,
+          code: row.subject_code,
+          description: row.description,
+          grade: row.grade,
+          grade_id: row.grade_id,
+          academic_year: new Date().getFullYear().toString(),
+          status: row.status,
+          is_current: row.is_current,
+          progress: row.progress_percent,
+          marks: {
+            term1: null,
+            term2: null,
+            term3: null,
+            term4: null,
+            final: null,
+            passed: null
+          },
+          teacher: 'Not assigned'
+        })),
+        byGrade: Object.values(groupedByGrade)
+      }
+    });
+  } catch (error) {
+    console.error('Get enrollment history error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch enrollment history' });
+  }
+};
+
+module.exports = { updateMarks, processGradeProgression, getReport, getMySubjects, getEnrollmentHistory };

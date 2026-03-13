@@ -195,19 +195,32 @@ const approveTeacher = async (req, res) => {
     await db.query('BEGIN');
 
     try {
-      // Create user account
-      const userResult = await db.query(`
+      // ============================================
+      // FIX: Simplified insert - let database handle id, timestamps
+      // ============================================
+      
+      console.log('🔥 [ADMIN] Creating user for teacher:', teacher.email);
+      
+      const insertQuery = `
         INSERT INTO users (
-          email, password_hash, first_name, last_name, role, is_active, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, 'teacher', true, NOW(), NOW())
-        RETURNING id, email, first_name, last_name
-      `, [
+          email, password_hash, first_name, last_name, 
+          role, is_active, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, true, NOW(), NOW())
+        RETURNING id, email, first_name, last_name, role, is_active
+      `;
+      
+      const insertValues = [
         teacher.email,
         teacher.password_hash,
         teacher.first_name,
-        teacher.last_name
-      ]);
+        teacher.last_name,
+        'teacher'
+      ];
 
+      console.log('🔥 [ADMIN] Insert query:', insertQuery);
+      console.log('🔥 [ADMIN] Email being inserted:', teacher.email);
+
+      const userResult = await db.query(insertQuery, insertValues);
       const newTeacher = userResult.rows[0];
       console.log('✅ [ADMIN] Created user account:', newTeacher.id);
 
@@ -286,7 +299,7 @@ const approveTeacher = async (req, res) => {
 
   } catch (error) {
     console.error('❌ [ADMIN] Error approving teacher:', error);
-    res.status(500).json({ success: false, message: 'Failed to approve teacher' });
+    res.status(500).json({ success: false, message: 'Failed to approve teacher', error: error.message });
   }
 };
 

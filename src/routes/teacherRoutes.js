@@ -66,8 +66,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
     const studentsResult = await db.query(`
       SELECT COUNT(DISTINCT lm.learner_id) as total_students
       FROM teacher_assignments ta
-      JOIN learner_modules lm ON ta.grade_id = lm.grade_id 
-        AND ta.subject_id = lm.module_id
+      JOIN grades g ON ta.grade_id = g.id
+      JOIN learner_modules lm ON ta.subject_id = lm.module_id 
+        AND lm.grade_id = g.id
       WHERE ta.teacher_id = $1::uuid
       AND ta.academic_year = $2
       AND lm.status = 'active'
@@ -92,7 +93,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
       AND s.marks_obtained IS NULL
     `, [teacherId]);
 
-    // Get recent activity (last 5 materials uploaded) - FIXED: removed grade_id join
+    // Get recent activity (last 5 materials uploaded)
     const recentActivity = await db.query(`
       SELECT 
         m.id,
@@ -122,8 +123,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
       acc[gradeKey].subjects.push({
         assignmentId: row.assignment_id,
         subjectId: row.subject_id,
-        code: row.subject_code,
-        name: row.subject_name,
+        code: row.code,
+        name: row.name,
         department: row.department,
         description: row.description,
         isPrimary: row.is_primary,
@@ -152,8 +153,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
         grades: Object.values(subjectsByGrade),
         subjects: subjectsResult.rows.map(s => ({
           id: s.subject_id,
-          code: s.subject_code,
-          name: s.subject_name,
+          code: s.code,
+          name: s.name,
           department: s.department,
           grade: s.grade_name,
           gradeLevel: s.grade_level,
