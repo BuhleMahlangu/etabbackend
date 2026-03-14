@@ -23,6 +23,8 @@ const teacherRoutes = require('./routes/teacherRoutes');
 const teacherLearnerRoutes = require('./routes/teacherLearnerRoutes');
 const announcementRoutes = require('./routes/announcementRoutes');
 const quizRoutes = require('./routes/quizRoutes');
+const assignmentRoutes = require('./routes/assignmentRoutes');
+const progressRoutes = require('./routes/progressRoutes');
 
 const app = express();
 
@@ -152,6 +154,8 @@ app.use('/api/teachers', teacherRoutes);
 app.use('/api/teacher-learners', teacherLearnerRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/quizzes', quizRoutes);
+app.use('/api/assignments', assignmentRoutes);
+app.use('/api/progress', progressRoutes);
 
 // 404 handler
 app.use((req, res) => {

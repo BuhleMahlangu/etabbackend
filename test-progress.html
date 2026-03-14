@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Test Progress API</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    .container { max-width: 800px; margin: 0 auto; }
+    .card { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 8px; }
+    .error { background: #ffebee; color: #c62828; }
+    .success { background: #e8f5e9; color: #2e7d32; }
+    pre { background: #333; color: #0f0; padding: 10px; overflow: auto; font-size: 12px; }
+    input { padding: 8px; margin: 5px; width: 300px; }
+    button { padding: 10px 20px; background: #1976d2; color: white; border: none; cursor: pointer; }
+    button:hover { background: #1565c0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎓 Test Progress API</h1>
+    
+    <div class="card">
+      <h3>Login</h3>
+      <input type="email" id="email" placeholder="Email" value="tyleraustin@gmail.com"><br>
+      <input type="password" id="password" placeholder="Password" value="password123"><br>
+      <button onclick="login()">Login</button>
+    </div>
+
+    <div id="tokenDisplay" class="card" style="display:none;">
+      <h3>Token</h3>
+      <p id="tokenText" style="word-break: break-all; font-size: 12px;"></p>
+    </div>
+
+    <div class="card">
+      <h3>Test Progress API</h3>
+      <button onclick="getProgress()" id="progressBtn" disabled>Get My Progress</button>
+    </div>
+
+    <div id="result"></div>
+  </div>
+
+  <script>
+    const API_URL = 'http://localhost:5000/api';
+    let token = localStorage.getItem('token');
+
+    if (token) {
+      document.getElementById('progressBtn').disabled = false;
+      document.getElementById('tokenDisplay').style.display = 'block';
+      document.getElementById('tokenText').textContent = token.substring(0, 50) + '...';
+    }
+
+    async function login() {
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+
+      try {
+        const res = await fetch(`${API_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+
+        const data = await res.json();
+        
+        if (data.success) {
+          token = data.token;
+          localStorage.setItem('token', token);
+          document.getElementById('progressBtn').disabled = false;
+          document.getElementById('tokenDisplay').style.display = 'block';
+          document.getElementById('tokenText').textContent = token.substring(0, 50) + '...';
+          showResult('✅ Login successful!', 'success');
+        } else {
+          showResult('❌ Login failed: ' + data.message, 'error');
+        }
+      } catch (err) {
+        showResult('❌ Error: ' + err.message, 'error');
+      }
+    }
+
+    async function getProgress() {
+      try {
+        showResult('Loading...', '');
+        
+        const res = await fetch(`${API_URL}/progress/my-progress`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        const data = await res.json();
+        
+        if (data.success) {
+          let html = '<div class="card success"><h3>✅ Progress Data</h3>';
+          html += '<h4>Overall:</h4>';
+          html += `<p>Grade: <strong>${data.data.overall.overallGrade}</strong></p>`;
+          html += `<p>Percentage: <strong>${data.data.overall.overallPercentage}%</strong></p>`;
+          html += `<p>Subjects: ${data.data.overall.totalSubjects}</p>`;
+          html += `<p>Assignments: ${data.data.overall.gradedAssignments}/${data.data.overall.totalAssignments}</p>`;
+          
+          html += '<h4>Subjects:</h4><ul>';
+          data.data.subjects.forEach(s => {
+            html += `<li><strong>${s.subjectName}</strong> - Grade: ${s.letterGrade} (${s.overallPercentage}%) - Assignments: ${s.assignments.percentage}%</li>`;
+          });
+          html += '</ul></div>';
+          
+          html += '<h4>Raw JSON:</h4><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+          document.getElementById('result').innerHTML = html;
+        } else {
+          showResult('❌ API Error: ' + data.message, 'error');
+        }
+      } catch (err) {
+        showResult('❌ Error: ' + err.message, 'error');
+      }
+    }
+
+    function showResult(text, type) {
+      document.getElementById('result').innerHTML = `<div class="card ${type}">${text}</div>`;
+    }
+  </script>
+</body>
+</html>
