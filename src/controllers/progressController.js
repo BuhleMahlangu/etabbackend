@@ -63,8 +63,8 @@ const getLearnerProgress = async (req, res) => {
           q.subject_id,
           COUNT(DISTINCT q.id) as total_quizzes,
           COUNT(DISTINCT CASE WHEN qa.id IS NOT NULL THEN q.id END) as attempted_count,
-          COUNT(DISTINCT CASE WHEN qa.status = 'completed' THEN q.id END) as completed_count,
-          COALESCE(AVG(CASE WHEN qa.status = 'completed' THEN qa.percentage END), 0) as average_percentage,
+          COUNT(DISTINCT CASE WHEN qa.status IN ('submitted', 'auto_submitted', 'graded', 'completed') THEN q.id END) as completed_count,
+          COALESCE(AVG(CASE WHEN qa.status IN ('submitted', 'auto_submitted', 'graded', 'completed') THEN qa.percentage_score END), 0) as average_percentage,
           COALESCE(SUM(CASE WHEN qa.passed = true THEN 1 ELSE 0 END), 0) as passed_count
         FROM quizzes q
         LEFT JOIN quiz_attempts qa ON q.id = qa.quiz_id AND qa.learner_id = $1
@@ -114,7 +114,7 @@ const getLearnerProgress = async (req, res) => {
         : 0;
 
       // Calculate quiz percentage
-      const quizPercentage = quizData.average_percentage || 0;
+      const quizPercentage = parseFloat(quizData.average_percentage) || 0;
 
       // Calculate subject overall (50% assignments, 50% quizzes)
       const subjectOverall = quizData.total_quizzes > 0 && assignmentData.total_assignments > 0
@@ -162,10 +162,18 @@ const getLearnerProgress = async (req, res) => {
       ? Math.round((totalAssignmentObtained / totalAssignmentMax) * 100 * 10) / 10 
       : 0;
 
-    const quizPercentages = quizzesResult.rows.filter(q => q.average_percentage > 0).map(q => q.average_percentage);
+    const quizPercentages = quizzesResult.rows.filter(q => parseFloat(q.average_percentage) > 0).map(q => parseFloat(q.average_percentage));
     overallStats.quizAverage = quizPercentages.length > 0
       ? Math.round(quizPercentages.reduce((a, b) => a + b, 0) / quizPercentages.length * 10) / 10
       : 0;
+
+    console.log('[Progress] Calculation:', {
+      totalAssignments: overallStats.totalAssignments,
+      assignmentAverage: overallStats.assignmentAverage,
+      totalQuizzes: overallStats.totalQuizzes,
+      quizAverage: overallStats.quizAverage,
+      quizPercentages
+    });
 
     // Calculate overall percentage (weighted)
     if (overallStats.totalAssignments > 0 && overallStats.totalQuizzes > 0) {
@@ -176,7 +184,13 @@ const getLearnerProgress = async (req, res) => {
       overallStats.overallPercentage = overallStats.quizAverage;
     }
 
+    // Calculate grade AFTER calculating overallPercentage
     overallStats.overallGrade = calculateLetterGrade(overallStats.overallPercentage);
+
+    console.log('[Progress] Final:', {
+      overallPercentage: overallStats.overallPercentage,
+      overallGrade: overallStats.overallGrade
+    });
 
     // Get recent activity
     const recentActivity = await getRecentActivity(learnerId);
@@ -247,11 +261,11 @@ const getSubjectProgress = async (req, res) => {
         q.passing_score,
         qa.id as attempt_id,
         qa.status as attempt_status,
-        qa.score,
-        qa.percentage,
+        qa.total_score as score,
+        qa.percentage_score as percentage,
         qa.passed,
         qa.started_at,
-        qa.completed_at
+        qa.submitted_at as completed_at
       FROM quizzes q
       LEFT JOIN quiz_attempts qa ON q.id = qa.quiz_id AND qa.learner_id = $1
       WHERE q.subject_id = $2 AND q.is_published = true
@@ -277,15 +291,20 @@ const getSubjectProgress = async (req, res) => {
       : 0;
 
     // Calculate quiz stats
+    const completedQuizzes = quizzesResult.rows.filter(q => ['submitted', 'auto_submitted', 'graded', 'completed'].includes(q.attempt_status));
+    const quizPercentages = completedQuizzes
+      .filter(q => q.percentage !== null && q.percentage !== undefined)
+      .map(q => parseFloat(q.percentage) || 0);
+    
     const quizStats = {
       total: quizzesResult.rows.length,
       attempted: quizzesResult.rows.filter(q => q.attempt_id).length,
-      completed: quizzesResult.rows.filter(q => q.attempt_status === 'completed').length,
+      completed: completedQuizzes.length,
       passed: quizzesResult.rows.filter(q => q.passed).length,
-      averagePercentage: quizzesResult.rows.filter(q => q.percentage)
-        .reduce((sum, q, _, arr) => sum + parseFloat(q.percentage) / arr.length, 0) || 0
+      averagePercentage: quizPercentages.length > 0
+        ? Math.round((quizPercentages.reduce((a, b) => a + b, 0) / quizPercentages.length) * 10) / 10
+        : 0
     };
-    quizStats.averagePercentage = Math.round(quizStats.averagePercentage * 10) / 10;
 
     // Overall subject grade
     const overallPercentage = quizStats.total > 0 && assignmentStats.total > 0
@@ -382,14 +401,14 @@ const getProgressHistory = async (req, res) => {
     // Get quiz scores over time
     const quizHistoryQuery = `
       SELECT 
-        DATE_TRUNC('month', completed_at) as month,
+        DATE_TRUNC('month', submitted_at) as month,
         COUNT(*) as count,
-        AVG(percentage) as average_percentage
+        AVG(percentage_score) as average_percentage
       FROM quiz_attempts
       WHERE learner_id = $1 
-        AND status = 'completed'
-        AND completed_at >= NOW() - INTERVAL '${months} months'
-      GROUP BY DATE_TRUNC('month', completed_at)
+        AND status IN ('submitted', 'auto_submitted', 'graded', 'completed')
+        AND submitted_at >= NOW() - INTERVAL '${months} months'
+      GROUP BY DATE_TRUNC('month', submitted_at)
       ORDER BY month
     `;
     const quizHistory = await db.query(quizHistoryQuery, [learnerId]);
@@ -434,17 +453,17 @@ const getRecentActivity = async (learnerId) => {
     SELECT 
       'quiz_completed' as type,
       q.title as title,
-      qa.score,
+      qa.total_score as score,
       q.total_marks as max_marks,
-      qa.percentage,
+      qa.percentage_score as percentage,
       qa.passed,
-      qa.completed_at as activity_date,
+      qa.submitted_at as activity_date,
       m.name as subject_name
     FROM quiz_attempts qa
     JOIN quizzes q ON qa.quiz_id = q.id
     JOIN modules m ON q.subject_id = m.id
-    WHERE qa.learner_id = $1 AND qa.status = 'completed'
-    ORDER BY qa.completed_at DESC
+    WHERE qa.learner_id = $1 AND qa.status IN ('submitted', 'auto_submitted', 'graded', 'completed')
+    ORDER BY qa.submitted_at DESC
     LIMIT 5
   `, [learnerId]);
 

@@ -596,12 +596,68 @@ const createNotificationsForStudents = async (
   }
 };
 
+// ============================================
+// GET MATERIAL STATS
+// ============================================
+const getStats = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    // Get total materials for this learner
+    const totalResult = await db.query(`
+      SELECT COUNT(*) FROM materials m
+      WHERE m.is_published = true
+      AND m.subject_id IN (
+        SELECT module_id FROM learner_modules 
+        WHERE learner_id = $1 AND status = 'active'
+      )
+    `, [userId]);
+    
+    // Get recent materials (last 7 days)
+    const recentResult = await db.query(`
+      SELECT COUNT(*) FROM materials m
+      WHERE m.is_published = true
+      AND m.created_at >= NOW() - INTERVAL '7 days'
+      AND m.subject_id IN (
+        SELECT module_id FROM learner_modules 
+        WHERE learner_id = $1 AND status = 'active'
+      )
+    `, [userId]);
+    
+    // Get materials by subject
+    const bySubjectResult = await db.query(`
+      SELECT m.subject_id, mod.name as subject_name, COUNT(*) as count
+      FROM materials m
+      JOIN modules mod ON m.subject_id = mod.id
+      WHERE m.is_published = true
+      AND m.subject_id IN (
+        SELECT module_id FROM learner_modules 
+        WHERE learner_id = $1 AND status = 'active'
+      )
+      GROUP BY m.subject_id, mod.name
+    `, [userId]);
+    
+    res.json({
+      success: true,
+      data: {
+        total: parseInt(totalResult.rows[0].count),
+        recent: parseInt(recentResult.rows[0].count),
+        bySubject: bySubjectResult.rows
+      }
+    });
+  } catch (error) {
+    console.error('Get material stats error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch stats' });
+  }
+};
+
 module.exports = { 
   getAll, 
   upload, 
   getById, 
   getBySubject,
   getMyMaterials,
+  getStats,
   update, 
   delete: deleteMaterial 
 };

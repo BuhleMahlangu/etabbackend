@@ -9,7 +9,19 @@ const {
   rejectTeacher,
   getAllAdmins,
   createAdmin,
-  toggleAdminStatus
+  toggleAdminStatus,
+  getAllUsers,
+  getUserById,
+  updateUser,
+  updateUserStatus,
+  deleteUser,
+  getAllSubjects,
+  getSubjectById,
+  createSubject,
+  updateSubject,
+  getAllGrades,
+  updateSubjectStatus,
+  deleteSubject
 } = require('../controllers/adminController');
 
 // All routes require admin authentication
@@ -66,5 +78,25 @@ router.post('/create-admin', createAdmin);
 
 // Toggle admin status (activate/deactivate)
 router.patch('/admins/:adminId/status', toggleAdminStatus);
+
+// ============================================
+// USER MANAGEMENT
+// ============================================
+router.get('/users', getAllUsers);
+router.get('/users/:id', getUserById);
+router.put('/users/:id', updateUser);
+router.put('/users/:id/status', updateUserStatus);
+router.delete('/users/:id', deleteUser);
+
+// ============================================
+// SUBJECT MANAGEMENT
+// ============================================
+router.get('/subjects', getAllSubjects);
+router.get('/subjects/:id', getSubjectById);
+router.post('/subjects', createSubject);
+router.put('/subjects/:id', updateSubject);
+router.get('/grades', getAllGrades);
+router.put('/subjects/:id/status', updateSubjectStatus);
+router.delete('/subjects/:id', deleteSubject);
 
 module.exports = router;

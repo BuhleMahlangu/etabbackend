@@ -7,6 +7,7 @@ const { handleUpload } = require('../middleware/uploadMiddleware');
 const db = require('../config/database');
 
 router.get('/', authenticate, materialController.getAll);
+router.get('/stats', authenticate, materialController.getStats);
 router.get('/my-materials', authenticate, materialController.getMyMaterials);
 router.get('/subject/:subjectId', authenticate, materialController.getBySubject);
 router.post('/', authenticate, isTeacher, handleUpload('file'), materialController.upload);

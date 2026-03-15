@@ -540,6 +540,254 @@ const toggleAdminStatus = async (req, res) => {
   }
 };
 
+// ============================================
+// GET ALL USERS
+// ============================================
+const getAllUsers = async (req, res) => {
+  try {
+    const users = await db.query(`
+      SELECT u.id, u.first_name, u.last_name, u.email, u.role, u.is_active, u.created_at, u.grade_id, g.name as grade_name
+      FROM users u
+      LEFT JOIN grades g ON u.grade_id = g.id
+      ORDER BY u.created_at DESC
+    `);
+    
+    res.json({ success: true, data: users.rows });
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch users' });
+  }
+};
+
+// ============================================
+// UPDATE USER STATUS
+// ============================================
+const updateUserStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body;
+    
+    await db.query('UPDATE users SET is_active = $1 WHERE id = $2', [isActive, id]);
+    res.json({ success: true, message: 'User status updated' });
+  } catch (error) {
+    console.error('Error updating user status:', error);
+    res.status(500).json({ success: false, message: 'Failed to update user status' });
+  }
+};
+
+// ============================================
+// DELETE USER
+// ============================================
+const deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.query('DELETE FROM users WHERE id = $1', [id]);
+    res.json({ success: true, message: 'User deleted' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete user' });
+  }
+};
+
+// ============================================
+// GET ALL SUBJECTS
+// ============================================
+const getAllSubjects = async (req, res) => {
+  try {
+    console.log('[ADMIN] getAllSubjects called');
+    
+    const subjects = await db.query(`
+      SELECT m.id, m.name, m.code, m.description, m.is_active, m.created_at,
+             (SELECT COUNT(*) FROM learner_modules WHERE module_id = m.id) as student_count,
+             (SELECT COUNT(*) FROM materials WHERE subject_id = m.id) as material_count
+      FROM modules m
+      ORDER BY m.name
+    `);
+    
+    console.log('[ADMIN] Subjects fetched:', subjects.rows.length);
+    res.json({ success: true, data: subjects.rows });
+  } catch (error) {
+    console.error('[ADMIN] Error fetching subjects:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch subjects: ' + error.message });
+  }
+};
+
+// ============================================
+// GET ALL GRADES
+// ============================================
+const getAllGrades = async (req, res) => {
+  try {
+    const grades = await db.query('SELECT * FROM grades ORDER BY level');
+    res.json({ success: true, data: grades.rows });
+  } catch (error) {
+    console.error('Error fetching grades:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch grades' });
+  }
+};
+
+// ============================================
+// UPDATE SUBJECT STATUS
+// ============================================
+const updateSubjectStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body;
+    
+    await db.query('UPDATE modules SET is_active = $1 WHERE id = $2', [isActive, id]);
+    res.json({ success: true, message: 'Subject status updated' });
+  } catch (error) {
+    console.error('Error updating subject status:', error);
+    res.status(500).json({ success: false, message: 'Failed to update subject status' });
+  }
+};
+
+// ============================================
+// DELETE SUBJECT
+// ============================================
+const deleteSubject = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.query('DELETE FROM modules WHERE id = $1', [id]);
+    res.json({ success: true, message: 'Subject deleted' });
+  } catch (error) {
+    console.error('Error deleting subject:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete subject' });
+  }
+};
+
+// ============================================
+// GET USER BY ID
+// ============================================
+const getUserById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Try users table first
+    let result = await db.query(
+      `SELECT id, email, first_name, last_name, role, is_active, created_at, last_login 
+       FROM users WHERE id = $1`,
+      [id]
+    );
+    
+    // If not found, try admins table
+    if (result.rows.length === 0) {
+      result = await db.query(
+        `SELECT id, email, first_name, last_name, 'admin' as role, is_active, created_at, last_login 
+         FROM admins WHERE id = $1`,
+        [id]
+      );
+    }
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch user' });
+  }
+};
+
+// ============================================
+// UPDATE USER
+// ============================================
+const updateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { firstName, lastName, email, role, isActive } = req.body;
+    
+    // Check if user exists in users table
+    const userCheck = await db.query('SELECT id FROM users WHERE id = $1', [id]);
+    
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Update user
+    await db.query(
+      `UPDATE users 
+       SET first_name = $1, last_name = $2, email = $3, role = $4, is_active = $5, updated_at = NOW()
+       WHERE id = $6`,
+      [firstName, lastName, email, role, isActive, id]
+    );
+    
+    res.json({ success: true, message: 'User updated successfully' });
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({ success: false, message: 'Failed to update user' });
+  }
+};
+
+// ============================================
+// CREATE SUBJECT
+// ============================================
+const createSubject = async (req, res) => {
+  try {
+    const { name, code, description, department, credits } = req.body;
+    
+    const result = await db.query(
+      `INSERT INTO modules (name, code, description, department, credits, is_active, created_at)
+       VALUES ($1, $2, $3, $4, $5, true, NOW())
+       RETURNING *`,
+      [name, code, description, department || 'General', credits || 1]
+    );
+    
+    res.status(201).json({ success: true, message: 'Subject created', data: result.rows[0] });
+  } catch (error) {
+    console.error('Error creating subject:', error);
+    res.status(500).json({ success: false, message: 'Failed to create subject' });
+  }
+};
+
+// ============================================
+// UPDATE SUBJECT
+// ============================================
+const updateSubject = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, code, description, department, credits, isActive } = req.body;
+    
+    await db.query(
+      `UPDATE modules 
+       SET name = $1, code = $2, description = $3, department = $4, credits = $5, is_active = $6
+       WHERE id = $7`,
+      [name, code, description, department, credits, isActive, id]
+    );
+    
+    res.json({ success: true, message: 'Subject updated successfully' });
+  } catch (error) {
+    console.error('Error updating subject:', error);
+    res.status(500).json({ success: false, message: 'Failed to update subject: ' + error.message });
+  }
+};
+
+// ============================================
+// GET SUBJECT BY ID
+// ============================================
+const getSubjectById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await db.query(
+      `SELECT m.*, 
+              (SELECT COUNT(*) FROM learner_modules WHERE module_id = m.id) as student_count,
+              (SELECT COUNT(*) FROM materials WHERE subject_id = m.id) as material_count
+       FROM modules m WHERE m.id = $1`,
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Subject not found' });
+    }
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error fetching subject:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch subject' });
+  }
+};
+
 module.exports = {
   getDashboardStats,
   getPendingTeachers,
@@ -549,5 +797,17 @@ module.exports = {
   checkTeacherStatus,
   getAllAdmins,
   createAdmin,
-  toggleAdminStatus
+  toggleAdminStatus,
+  getAllUsers,
+  getUserById,
+  updateUser,
+  updateUserStatus,
+  deleteUser,
+  getAllSubjects,
+  getSubjectById,
+  createSubject,
+  updateSubject,
+  getAllGrades,
+  updateSubjectStatus,
+  deleteSubject
 };

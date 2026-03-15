@@ -25,6 +25,8 @@ const announcementRoutes = require('./routes/announcementRoutes');
 const quizRoutes = require('./routes/quizRoutes');
 const assignmentRoutes = require('./routes/assignmentRoutes');
 const progressRoutes = require('./routes/progressRoutes');
+const supportRoutes = require('./routes/supportRoutes');
+const subjectMessageRoutes = require('./routes/subjectMessageRoutes');
 
 const app = express();
 
@@ -174,6 +176,8 @@ app.use('/api/announcements', announcementRoutes);
 app.use('/api/quizzes', quizRoutes);
 app.use('/api/assignments', assignmentRoutes);
 app.use('/api/progress', progressRoutes);
+app.use('/api/support', supportRoutes);
+app.use('/api/subject-messages', subjectMessageRoutes);
 
 // 404 handler
 app.use((req, res) => {

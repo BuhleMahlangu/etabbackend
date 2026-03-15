@@ -110,7 +110,23 @@ const authenticate = async (req, res, next) => {
     next();
     
   } catch (error) {
-    console.error('❌ [AUTH] Unexpected error:', error);
+    console.error('❌ [AUTH] Unexpected error:', error.message);
+    
+    // Check for database connection errors
+    if (error.message && error.message.includes('timeout')) {
+      return res.status(503).json({ 
+        success: false, 
+        message: 'Database connection timeout. Please try again.' 
+      });
+    }
+    
+    if (error.message && error.message.includes('terminated')) {
+      return res.status(503).json({ 
+        success: false, 
+        message: 'Database connection lost. Please try again.' 
+      });
+    }
+    
     return res.status(401).json({ success: false, message: 'Authentication failed' });
   }
 };

@@ -53,7 +53,7 @@ router.get('/my-subjects', authenticate, async (req, res) => {
 
     const { grade_id, grade_name, phase, level } = userResult.rows[0];
 
-    // Get all modules for this grade with enrollment status
+    // Get all modules for this grade with enrollment status and teacher info
     const modulesResult = await db.query(`
       SELECT 
         m.id,
@@ -69,10 +69,15 @@ router.get('/my-subjects', authenticate, async (req, res) => {
           WHEN lm.id IS NOT NULL THEN true
           WHEN gm.is_compulsory THEN true
           ELSE false
-        END as is_enrolled
+        END as is_enrolled,
+        t.teacher_id,
+        u.first_name as teacher_first_name,
+        u.last_name as teacher_last_name
       FROM modules m
       JOIN grade_modules gm ON m.id = gm.module_id
       LEFT JOIN learner_modules lm ON m.id = lm.module_id AND lm.learner_id = $1::uuid
+      LEFT JOIN teacher_assignments t ON m.id = t.subject_id AND t.is_active = true
+      LEFT JOIN users u ON t.teacher_id = u.id
       WHERE gm.grade_id = $2::uuid
       AND m.is_active = true
       ORDER BY gm.is_compulsory DESC, m.department, m.name
@@ -100,7 +105,11 @@ router.get('/my-subjects', authenticate, async (req, res) => {
         isDoing: isDoing,
         status: module.enrollment_status || (module.is_compulsory ? 'auto_enrolled' : 'available'),
         progress: module.progress,
-        coverImage: getDefaultCoverImage(module.department)
+        coverImage: getDefaultCoverImage(module.department),
+        teacher_id: module.teacher_id,
+        teacher_name: module.teacher_first_name && module.teacher_last_name 
+          ? `${module.teacher_first_name} ${module.teacher_last_name}`
+          : 'Not Assigned'
       };
 
       if (isDoing) {

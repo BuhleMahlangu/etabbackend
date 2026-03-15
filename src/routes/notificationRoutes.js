@@ -15,6 +15,7 @@ router.get('/unread-count', authenticate, notificationController.getNotification
 router.get('/user/:userId', authenticate, notificationController.getForUser);
 router.put('/:id/read', authenticate, notificationController.markAsRead);
 router.put('/mark-all-read', authenticate, notificationController.markAllAsRead);
+router.put('/read-all', authenticate, notificationController.markAllAsRead); // Alias
 router.delete('/:id', authenticate, notificationController.deleteNotification);
 
 // Protected routes - Teachers and Admins only (create notification manually)
