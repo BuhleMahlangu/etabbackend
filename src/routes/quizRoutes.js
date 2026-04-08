@@ -22,5 +22,7 @@ router.get('/:quizId/attempts', authenticate, isTeacher, quizController.getQuizA
 router.get('/:quizId/statistics', authenticate, isTeacher, quizController.getQuizStatistics);
 router.get('/attempts/:attemptId/review', authenticate, isTeacher, quizController.getAttemptForReview);
 router.put('/answers/:answerId/override', authenticate, isTeacher, quizController.overrideAnswerMark);
+router.get('/student/:studentId/results', authenticate, isTeacher, quizController.getStudentQuizResults);
+router.post('/:id/extend-due-date', authenticate, isTeacher, quizController.extendDueDate);
 
 module.exports = router;

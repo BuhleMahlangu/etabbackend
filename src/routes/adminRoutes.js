@@ -7,29 +7,28 @@ const {
   getAllTeachers,
   approveTeacher,
   rejectTeacher,
-  getAllAdmins,
-  createAdmin,
-  toggleAdminStatus,
+  getAllLearners,
   getAllUsers,
+  // User management
   getUserById,
   updateUser,
   updateUserStatus,
   deleteUser,
+  // Subject management
   getAllSubjects,
   getSubjectById,
   createSubject,
   updateSubject,
-  getAllGrades,
-  updateSubjectStatus,
-  deleteSubject
+  deleteSubject,
+  getAllGrades
 } = require('../controllers/adminController');
 
 // All routes require admin authentication
 router.use(authenticate);
 
-// Check admin middleware
+// Check admin middleware - allows both super admins ('admin') and school admins ('school_admin')
 const requireAdmin = (req, res, next) => {
-  if (req.user.role !== 'admin') {
+  if (req.user.role !== 'admin' && req.user.role !== 'school_admin') {
     return res.status(403).json({ success: false, message: 'Admin access required' });
   }
   next();
@@ -57,35 +56,27 @@ router.get('/teachers/pending', getPendingTeachers);
 router.get('/pending-teachers', getPendingTeachers);
 
 // Teacher approval actions (new RESTful URLs)
-router.post('/teachers/:pendingId/approve', approveTeacher);
-router.post('/teachers/:pendingId/reject', rejectTeacher);
+router.post('/teachers/:id/approve', approveTeacher);
+router.post('/teachers/:id/reject', rejectTeacher);
 
 // Legacy teacher approval URLs (for backward compatibility)
-router.post('/approve-teacher/:pendingId', approveTeacher);
-router.post('/reject-teacher/:pendingId', rejectTeacher);
+router.post('/approve-teacher/:id', approveTeacher);
+router.post('/reject-teacher/:id', rejectTeacher);
 
 // ============================================
-// ADMIN MANAGEMENT
+// USER MANAGEMENT (LEARNERS)
 // ============================================
-
-// Get all admins
-router.get('/admins', getAllAdmins);
-
-// Create new admin
-router.post('/admins', createAdmin);
-// Legacy alias
-router.post('/create-admin', createAdmin);
-
-// Toggle admin status (activate/deactivate)
-router.patch('/admins/:adminId/status', toggleAdminStatus);
+router.get('/learners', getAllLearners);
 
 // ============================================
-// USER MANAGEMENT
+// USER MANAGEMENT (ALL USERS - Learners + Teachers)
 // ============================================
 router.get('/users', getAllUsers);
+
+// User detail management
 router.get('/users/:id', getUserById);
 router.put('/users/:id', updateUser);
-router.put('/users/:id/status', updateUserStatus);
+router.patch('/users/:id/status', updateUserStatus);
 router.delete('/users/:id', deleteUser);
 
 // ============================================
@@ -95,8 +86,11 @@ router.get('/subjects', getAllSubjects);
 router.get('/subjects/:id', getSubjectById);
 router.post('/subjects', createSubject);
 router.put('/subjects/:id', updateSubject);
-router.get('/grades', getAllGrades);
-router.put('/subjects/:id/status', updateSubjectStatus);
 router.delete('/subjects/:id', deleteSubject);
+
+// ============================================
+// GRADE MANAGEMENT
+// ============================================
+router.get('/grades', getAllGrades);
 
 module.exports = router;

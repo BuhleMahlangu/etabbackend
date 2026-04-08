@@ -25,6 +25,47 @@ function looksLikeUUID(v) {
 }
 
 // ============================================
+// GET ALL SUBJECTS - School-aware (for admin/teacher)
+// ============================================
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const { grade, phase } = req.query;
+    const { schoolId, isSuperAdmin } = req.user || {};
+    
+    let query = 'SELECT * FROM subjects WHERE is_active = true';
+    let params = [];
+    let paramCount = 0;
+
+    // Filter by school for non-super-admins
+    if (!isSuperAdmin && schoolId) {
+      paramCount++;
+      query += ` AND school_id = $${paramCount}`;
+      params.push(schoolId);
+    }
+
+    if (grade) {
+      paramCount++;
+      query += ` AND $${paramCount} = ANY(applicable_grades)`;
+      params.push(grade);
+    }
+
+    if (phase) {
+      paramCount++;
+      query += ` AND phase = $${paramCount}`;
+      params.push(phase);
+    }
+
+    query += ' ORDER BY phase, name';
+
+    const result = await db.query(query, params);
+    res.json({ success: true, subjects: result.rows });
+  } catch (error) {
+    console.error('❌ Error fetching subjects:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch subjects' });
+  }
+});
+
+// ============================================
 // MAIN ROUTE: GET MY SUBJECTS (After Login)
 // ============================================
 router.get('/my-subjects', authenticate, async (req, res) => {
@@ -35,9 +76,9 @@ router.get('/my-subjects', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid user id' });
     }
 
-    // Get user's grade info
+    // Get user's grade AND school info
     const userResult = await db.query(`
-      SELECT u.grade_id, g.name as grade_name, g.phase, g.level
+      SELECT u.grade_id, u.school_id, g.name as grade_name, g.phase, g.level
       FROM users u
       LEFT JOIN grades g ON u.grade_id = g.id
       WHERE u.id = $1::uuid
@@ -51,9 +92,9 @@ router.get('/my-subjects', authenticate, async (req, res) => {
       });
     }
 
-    const { grade_id, grade_name, phase, level } = userResult.rows[0];
+    const { grade_id, school_id, grade_name, phase, level } = userResult.rows[0];
 
-    // Get all modules for this grade with enrollment status and teacher info
+    // Get all modules for this grade AND school with enrollment status and teacher info
     const modulesResult = await db.query(`
       SELECT 
         m.id,
@@ -79,9 +120,10 @@ router.get('/my-subjects', authenticate, async (req, res) => {
       LEFT JOIN teacher_assignments t ON m.id = t.subject_id AND t.is_active = true
       LEFT JOIN users u ON t.teacher_id = u.id
       WHERE gm.grade_id = $2::uuid
+      AND m.school_id = $3::uuid
       AND m.is_active = true
       ORDER BY gm.is_compulsory DESC, m.department, m.name
-    `, [userId, grade_id]);
+    `, [userId, grade_id, school_id]);
 
     // Categorize for frontend
     const doing = [];
@@ -146,6 +188,52 @@ router.get('/my-subjects', authenticate, async (req, res) => {
 });
 
 // ============================================
+// GET SUBJECTS BY SCHOOL CODE (Public - For Registration)
+// ============================================
+router.get('/by-school/:schoolCode', async (req, res) => {
+  try {
+    const { schoolCode } = req.params;
+    const { grade } = req.query;
+
+    if (!schoolCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'School code is required'
+      });
+    }
+
+    let query = `
+      SELECT id, code, name, phase, applicable_grades, department, credits
+      FROM subjects 
+      WHERE school_code = $1 AND is_active = true
+    `;
+    let params = [schoolCode.toUpperCase()];
+
+    if (grade) {
+      query += ` AND $2 = ANY(applicable_grades)`;
+      params.push(grade);
+    }
+
+    query += ` ORDER BY phase, department, name`;
+
+    const result = await db.query(query, params);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      subjects: result.rows
+    });
+
+  } catch (error) {
+    console.error('Error fetching subjects by school:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch subjects'
+    });
+  }
+});
+
+// ============================================
 // GET AVAILABLE GRADES (For Registration)
 // ============================================
 router.get('/available-grades', async (req, res) => {
@@ -181,11 +269,12 @@ router.get('/available-grades', async (req, res) => {
 });
 
 // ============================================
-// GET SUBJECTS BY GRADE (For Teacher Registration)
+// GET SUBJECTS BY GRADE (For Teacher Registration) - School-aware
 // ============================================
 router.get('/grade-subjects/:gradeId', async (req, res) => {
   try {
     const { gradeId } = req.params;
+    const { schoolCode } = req.query; // Get school code from query
 
     // Validate UUID
     if (!/^[0-9a-fA-F-]{36}$/.test(gradeId)) {
@@ -210,8 +299,8 @@ router.get('/grade-subjects/:gradeId', async (req, res) => {
 
     const grade = gradeResult.rows[0];
 
-    // Get subjects with learner enrollment count
-    const subjectsResult = await db.query(`
+    // Build query - filter by school if schoolCode provided
+    let query = `
       SELECT 
         m.id,
         m.code,
@@ -228,9 +317,22 @@ router.get('/grade-subjects/:gradeId', async (req, res) => {
         AND lm.status = 'active'
       WHERE gm.grade_id = $1::uuid
       AND m.is_active = true
+    `;
+    
+    let params = [gradeId];
+    
+    // Filter by school code if provided
+    if (schoolCode) {
+      query += ` AND m.school_code = $2`;
+      params.push(schoolCode);
+    }
+    
+    query += `
       GROUP BY m.id, m.code, m.name, m.description, m.department, m.credits, gm.is_compulsory
       ORDER BY gm.is_compulsory DESC, m.department, m.name
-    `, [gradeId]);
+    `;
+
+    const subjectsResult = await db.query(query, params);
 
     res.status(200).json({
       success: true,
@@ -303,13 +405,18 @@ router.post('/select-grade', authenticate, async (req, res) => {
       WHERE id = $4::uuid
     `, [gradeId, gradeName, level, userId]);
 
-    // Get modules to auto-enroll (gradeId as uuid)
+    // Get user's school_id for filtering
+    const userResult = await db.query('SELECT school_id FROM users WHERE id = $1::uuid', [userId]);
+    const schoolId = userResult.rows[0]?.school_id;
+    
+    // Get modules to auto-enroll (gradeId as uuid) - FILTER BY SCHOOL
     const modulesResult = await db.query(`
       SELECT m.id, gm.is_compulsory
       FROM modules m
       JOIN grade_modules gm ON m.id = gm.module_id
       WHERE gm.grade_id = $1::uuid
-    `, [gradeId]);
+      AND m.school_id = $2::uuid
+    `, [gradeId, schoolId]);
 
     // Determine which to auto-enroll
     // FET (10-12): Only compulsory
@@ -370,9 +477,9 @@ router.post('/enroll', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid user id' });
     }
 
-    // Check user's grade and current enrollments
+    // Check user's grade AND school
     const userResult = await db.query(`
-      SELECT u.grade_id, g.level, g.name
+      SELECT u.grade_id, u.school_id, g.level, g.name
       FROM users u
       JOIN grades g ON u.grade_id = g.id
       WHERE u.id = $1::uuid
@@ -385,7 +492,7 @@ router.post('/enroll', authenticate, async (req, res) => {
       });
     }
 
-    const { grade_id, level, name: gradeName } = userResult.rows[0];
+    const { grade_id, school_id, level, name: gradeName } = userResult.rows[0];
 
     if (level < 10) {
       return res.status(400).json({
@@ -398,12 +505,14 @@ router.post('/enroll', authenticate, async (req, res) => {
     const countResult = await db.query(`
       SELECT COUNT(*) as count
       FROM learner_modules lm
+      JOIN modules m ON lm.module_id = m.id
       JOIN grade_modules gm ON lm.module_id = gm.module_id
       WHERE lm.learner_id = $1::uuid
       AND gm.grade_id = $2::uuid
       AND gm.is_compulsory = false
       AND lm.status = 'active'
-    `, [userId, grade_id]);
+      AND m.school_id = $3::uuid
+    `, [userId, grade_id, school_id]);
 
     const optionalCount = parseInt(countResult.rows[0].count);
 
@@ -414,13 +523,15 @@ router.post('/enroll', authenticate, async (req, res) => {
       });
     }
 
-    // Verify module is optional for this grade
+    // Verify module is optional for this grade AND belongs to user's school
     const moduleCheck = await db.query(`
       SELECT m.name, gm.is_compulsory
       FROM modules m
       JOIN grade_modules gm ON m.id = gm.module_id
-      WHERE m.id = $1::uuid AND gm.grade_id = $2::uuid
-    `, [moduleId, grade_id]);
+      WHERE m.id = $1::uuid 
+      AND gm.grade_id = $2::uuid
+      AND m.school_id = $3::uuid
+    `, [moduleId, grade_id, school_id]);
 
     if (moduleCheck.rows.length === 0) {
       return res.status(404).json({
@@ -479,14 +590,17 @@ router.post('/drop', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid user id' });
     }
 
-    // Check if it's compulsory
+    // Check if it's compulsory (and belongs to user's school)
     const moduleCheck = await db.query(`
       SELECT m.name, gm.is_compulsory
       FROM learner_modules lm
       JOIN modules m ON lm.module_id = m.id
       JOIN grade_modules gm ON m.id = gm.module_id
       JOIN users u ON lm.learner_id = u.id
-      WHERE lm.learner_id = $1::uuid AND lm.module_id = $2::uuid AND gm.grade_id = u.grade_id
+      WHERE lm.learner_id = $1::uuid 
+      AND lm.module_id = $2::uuid 
+      AND gm.grade_id = u.grade_id
+      AND m.school_id = u.school_id
     `, [userId, moduleId]);
 
     if (moduleCheck.rows.length === 0) {
@@ -537,7 +651,7 @@ router.get('/:id', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid user id' });
     }
 
-    // Get module with user's context
+    // Get module with user's context (filtered by school first)
     const result = await db.query(`
       SELECT 
         m.*,
@@ -551,7 +665,9 @@ router.get('/:id', authenticate, async (req, res) => {
       JOIN grades g ON gm.grade_id = g.id
       JOIN users u ON u.grade_id = g.id
       LEFT JOIN learner_modules lm ON m.id = lm.module_id AND lm.learner_id = u.id
-      WHERE m.id = $1::uuid AND u.id = $2::uuid
+      WHERE m.id = $1::uuid 
+      AND u.id = $2::uuid
+      AND m.school_id = u.school_id
     `, [id, userId]);
 
     if (result.rows.length === 0) {

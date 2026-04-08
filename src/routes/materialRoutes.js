@@ -12,6 +12,7 @@ router.get('/my-materials', authenticate, materialController.getMyMaterials);
 router.get('/subject/:subjectId', authenticate, materialController.getBySubject);
 router.post('/', authenticate, isTeacher, handleUpload('file'), materialController.upload);
 router.get('/:id', authenticate, materialController.getById);
+router.get('/:id/download', authenticate, materialController.download);
 router.put('/:id', authenticate, materialController.update);
 router.delete('/:id', authenticate, materialController.delete);
 

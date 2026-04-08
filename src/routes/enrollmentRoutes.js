@@ -7,6 +7,9 @@ const { isTeacher, isAdmin } = require('../middleware/roleMiddleware');
 // Get my enrolled subjects (learner)
 router.get('/my-subjects', authenticate, enrollmentController.getMySubjects);
 
+// Get my enrollments with full details
+router.get('/my-enrollments', authenticate, enrollmentController.getMyEnrollments);
+
 // Get enrollment history for FET phase (Grades 10-12)
 router.get('/history', authenticate, enrollmentController.getEnrollmentHistory);
 

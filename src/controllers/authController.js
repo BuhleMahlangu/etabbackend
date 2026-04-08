@@ -2,28 +2,67 @@ const bcrypt = require('bcryptjs');
 const { generateToken } = require('../config/auth');
 const db = require('../config/database');
 
-// Get subjects for a specific grade
-const getSubjectsForGrade = async (grade) => {
+// Get compulsory subjects for a specific grade AND school
+const getCompulsorySubjectsForGrade = async (grade, schoolId) => {
+  // Get numeric grade level
+  const gradeLevel = parseInt(grade);
+  const isFET = gradeLevel >= 10;
+  
+  // For FET (Grade 10-12), only get compulsory subjects (is_compulsory = true)
+  // For GET (Grade 1-9), get all subjects linked to that grade (all are compulsory)
+  // Note: We get modules that belong to this specific school
   const result = await db.query(
-    'SELECT * FROM subjects WHERE $1 = ANY(applicable_grades) AND is_active = true',
-    [grade]
+    `SELECT DISTINCT m.* FROM modules m
+     JOIN grade_modules gm ON m.id = gm.module_id
+     JOIN grades g ON gm.grade_id = g.id
+     WHERE g.level = $1
+     AND m.school_id = $2
+     AND m.is_active = true
+     AND ($3 = false OR gm.is_compulsory = true)`,
+    [gradeLevel, schoolId, isFET]  // If FET, filter by is_compulsory=true; if GET, get all
   );
+  
+  // If no modules found for this school, check if there are any modules at all for this grade
+  // This handles the case where modules haven't been set up for a specific school yet
+  if (result.rows.length === 0 && !isFET) {
+    console.log(`[getCompulsorySubjectsForGrade] No modules found for school ${schoolId}, grade ${gradeLevel}. Checking for any school's modules...`);
+    
+    // Get modules from any school for this grade as a fallback
+    const fallbackResult = await db.query(
+      `SELECT DISTINCT m.* FROM modules m
+       JOIN grade_modules gm ON m.id = gm.module_id
+       JOIN grades g ON gm.grade_id = g.id
+       WHERE g.level = $1
+       AND m.is_active = true
+       LIMIT 20`,
+      [gradeLevel]
+    );
+    
+    if (fallbackResult.rows.length > 0) {
+      console.log(`[getCompulsorySubjectsForGrade] Found ${fallbackResult.rows.length} modules from other schools as fallback`);
+    }
+    
+    return fallbackResult.rows;
+  }
+  
   return result.rows;
 };
 
-// Auto-enroll learner in grade subjects
-const autoEnrollLearner = async (learnerId, grade, academicYear) => {
-  const subjects = await getSubjectsForGrade(grade);
+// Auto-enroll learner in compulsory grade subjects (school-aware)
+// For FET: Only compulsory subjects (HL, FAL, LO)
+// For GET: All applicable subjects
+const autoEnrollLearner = async (learnerId, grade, academicYear, schoolId) => {
+  const subjects = await getCompulsorySubjectsForGrade(grade, schoolId);
   
   for (const subject of subjects) {
     const existing = await db.query(
-      'SELECT id FROM enrollments WHERE learner_id = $1 AND subject_id = $2 AND academic_year = $3',
+      'SELECT id FROM enrollments WHERE learner_id = $1 AND module_id = $2 AND academic_year = $3',
       [learnerId, subject.id, academicYear]
     );
     
     if (existing.rows.length === 0) {
       await db.query(
-        `INSERT INTO enrollments (learner_id, subject_id, grade, academic_year, status)
+        `INSERT INTO enrollments (learner_id, module_id, grade, academic_year, status)
          VALUES ($1, $2, $3, $4, 'active')`,
         [learnerId, subject.id, grade, academicYear]
       );
@@ -107,13 +146,23 @@ const register = async (req, res) => {
     if (role === 'teacher') {
       console.log('🔥 [REGISTER] Processing TEACHER registration...');
       const assignments = teacherInfo?.assignments || [];
+      const schoolId = req.body.schoolId || null;
+      
+      // Get school code from schoolId
+      let schoolCode = null;
+      if (schoolId) {
+        const schoolResult = await db.query('SELECT code FROM schools WHERE id = $1', [schoolId]);
+        if (schoolResult.rows.length > 0) {
+          schoolCode = schoolResult.rows[0].code;
+        }
+      }
       
       await db.query(`
         INSERT INTO pending_teachers (
           email, password_hash, first_name, last_name,
           employee_number, qualification, specialization, years_experience, bio,
-          assignments, status, requested_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', NOW())
+          assignments, school_id, school_code, status, requested_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', NOW())
       `, [
         email,
         passwordHash,
@@ -124,10 +173,12 @@ const register = async (req, res) => {
         teacherInfo?.specialization || 'General',
         teacherInfo?.yearsOfExperience || 0,
         teacherInfo?.bio || 'New teacher',
-        JSON.stringify(assignments)
+        JSON.stringify(assignments),
+        schoolId,
+        schoolCode
       ]);
 
-      console.log('✅ [REGISTER] Teacher saved as pending');
+      console.log('✅ [REGISTER] Teacher saved as pending for school:', schoolCode);
       return res.status(201).json({ 
         success: true, 
         message: 'Teacher registration submitted for admin approval. You will receive an email once approved.',
@@ -243,17 +294,32 @@ const register = async (req, res) => {
     }
 
     console.log('🔥 [REGISTER] Inserting user into database...');
-    // Insert learner user - FIXED: only include columns that exist for learners
+    
+    // Get school_id and school_code from request (for multi-tenancy)
+    const schoolId = req.body.schoolId || null;
+    let schoolCode = null;
+    
+    if (schoolId) {
+      console.log('🔥 [REGISTER] Associating with school:', schoolId);
+      // Get school code
+      const schoolResult = await db.query('SELECT code FROM schools WHERE id = $1', [schoolId]);
+      if (schoolResult.rows.length > 0) {
+        schoolCode = schoolResult.rows[0].code;
+        console.log('🔥 [REGISTER] School code:', schoolCode);
+      }
+    }
+    
+    // Insert learner user - with school_code for easy retrieval
     let result;
     try {
       result = await db.query(
         `INSERT INTO users (
           email, password_hash, first_name, last_name, role, 
           grade_id, grade, current_grade, 
-          is_active
+          school_id, school_code, is_active
         ) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true) 
-        RETURNING id, email, first_name, last_name, role, grade, current_grade`,
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true) 
+        RETURNING id, email, first_name, last_name, role, grade, current_grade, school_id, school_code`,
         [
           email, 
           passwordHash, 
@@ -262,10 +328,12 @@ const register = async (req, res) => {
           userRole,
           gradeId,
           gradeName,
-          gradeLevel
+          gradeLevel,
+          schoolId,
+          schoolCode
         ]
       );
-      console.log('✅ [REGISTER] User inserted, ID:', result.rows[0]?.id);
+      console.log('✅ [REGISTER] User inserted, ID:', result.rows[0]?.id, 'School:', schoolCode);
     } catch (insertError) {
       console.error('❌ [REGISTER] Database insert failed:', insertError.message);
       throw insertError;
@@ -281,7 +349,7 @@ const register = async (req, res) => {
       // FIXED: Use gradeLevel (the number) instead of grade (the string) for subject matching
       const gradeForSubjects = gradeLevel ? gradeLevel.toString() : grade;
       console.log('🔥 [REGISTER] Using grade for subjects:', gradeForSubjects);
-      enrolledCount = await autoEnrollLearner(user.id, gradeForSubjects, academicYear);
+      enrolledCount = await autoEnrollLearner(user.id, gradeForSubjects, academicYear, user.school_id);
       console.log('✅ [REGISTER] Auto-enrolled in', enrolledCount, 'subjects');
     } catch (enrollError) {
       console.error('❌ [REGISTER] Auto-enroll failed:', enrollError.message);
@@ -291,19 +359,58 @@ const register = async (req, res) => {
     
     console.log('🔥 [REGISTER] Creating welcome notification...');
     try {
+      // Determine if FET phase (Grade 10-12)
+      const isFET = gradeLevel && gradeLevel >= 10;
+      
+      let notificationMessage;
+      if (isFET) {
+        notificationMessage = `Welcome to Grade ${gradeLevel}! You've been enrolled in ${enrolledCount} compulsory subjects (Home Language, First Additional Language, and Life Orientation). Please select up to 4 optional subjects from your dashboard to complete your registration.`;
+      } else {
+        notificationMessage = `You have been automatically enrolled in ${enrolledCount} subjects for ${gradeName || grade}.`;
+      }
+      
       await db.query(
         `INSERT INTO notifications (user_id, title, message, type)
          VALUES ($1, $2, $3, 'general')`,
         [
           user.id,
           'Welcome to E-tab!',
-          `You have been automatically enrolled in ${enrolledCount} subjects for ${gradeName || grade}.`
+          notificationMessage
         ]
       );
       console.log('✅ [REGISTER] Welcome notification created');
     } catch (notifError) {
       console.error('❌ [REGISTER] Notification failed:', notifError.message);
       // Don't fail registration if notification fails
+    }
+
+    // Send welcome email to learners
+    if (userRole === 'learner') {
+      console.log('🔥 [REGISTER] Sending welcome email...');
+      try {
+        const { sendWelcomeEmail } = require('../config/email');
+        const isFET = gradeLevel && gradeLevel >= 10;
+        
+        sendWelcomeEmail({
+          firstName: user.first_name,
+          lastName: user.last_name,
+          email: user.email,
+          role: user.role,
+          schoolId: user.school_id,
+          grade: gradeLevel,
+          isFET: isFET,
+          enrolledCount: enrolledCount
+        }).then(result => {
+          if (result.success) {
+            console.log('✅ [REGISTER] Welcome email sent');
+          } else {
+            console.error('❌ [REGISTER] Welcome email failed:', result.error);
+          }
+        });
+      } catch (emailError) {
+        console.error('❌ [REGISTER] Welcome email error:', emailError.message);
+        // Don't fail registration if email fails
+      }
     }
 
     console.log('🔥 [REGISTER] Generating token...');
@@ -362,11 +469,12 @@ const login = async (req, res) => {
     }
 
     // ============================================
-    // ADMIN LOGIN - Only check admins table
+    // ADMIN LOGIN - Check both super admins AND school admins
     // ============================================
     if (loginType === 'admin') {
-      console.log('🔥 [LOGIN] Admin login - checking admins table only');
+      console.log('🔥 [LOGIN] Admin login - checking both super admins and school admins');
       
+      // First check super admins (admins table)
       const adminResult = await db.query(
         `SELECT id, email, password_hash, first_name, last_name,  
                 is_active, is_super_admin, last_login
@@ -374,44 +482,93 @@ const login = async (req, res) => {
         [email]
       );
 
-      if (adminResult.rows.length === 0) {
-        console.log('❌ [LOGIN] Admin not found');
+      if (adminResult.rows.length > 0) {
+        const admin = adminResult.rows[0];
+
+        if (!admin.is_active) {
+          console.log('❌ [LOGIN] Super admin account deactivated');
+          return res.status(401).json({ success: false, message: 'Admin account deactivated' });
+        }
+
+        const isValid = await bcrypt.compare(password, admin.password_hash);
+        if (!isValid) {
+          console.log('❌ [LOGIN] Invalid super admin password');
+          return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
+
+        await db.query('UPDATE admins SET last_login = CURRENT_TIMESTAMP WHERE id = $1', [admin.id]);
+
+        const token = generateToken({
+          userId: admin.id,
+          email: admin.email,
+          role: 'admin',
+          isSuperAdmin: admin.is_super_admin
+        });
+
+        console.log('✅ [LOGIN] Super admin login SUCCESS');
+        return res.json({
+          success: true,
+          token,
+          user: {
+            id: admin.id,
+            email: admin.email,
+            firstName: admin.first_name,
+            lastName: admin.last_name,
+            role: 'admin',
+            isSuperAdmin: admin.is_super_admin
+          }
+        });
+      }
+
+      // Check school admins (users table with role='school_admin')
+      console.log('🔥 [LOGIN] Checking school admins table (users)');
+      const schoolAdminResult = await db.query(
+        `SELECT id, email, password_hash, first_name, last_name, role, school_id,
+                is_active, last_login
+         FROM users WHERE email = $1 AND role = 'school_admin'`,
+        [email]
+      );
+
+      if (schoolAdminResult.rows.length === 0) {
+        console.log('❌ [LOGIN] No admin found in either table');
         return res.status(401).json({ success: false, message: 'Invalid admin credentials' });
       }
 
-      const admin = adminResult.rows[0];
+      const schoolAdmin = schoolAdminResult.rows[0];
 
-      if (!admin.is_active) {
-        console.log('❌ [LOGIN] Admin account deactivated');
+      if (!schoolAdmin.is_active) {
+        console.log('❌ [LOGIN] School admin account deactivated');
         return res.status(401).json({ success: false, message: 'Admin account deactivated' });
       }
 
-      const isValid = await bcrypt.compare(password, admin.password_hash);
+      const isValid = await bcrypt.compare(password, schoolAdmin.password_hash);
       if (!isValid) {
-        console.log('❌ [LOGIN] Invalid admin password');
+        console.log('❌ [LOGIN] Invalid school admin password');
         return res.status(401).json({ success: false, message: 'Invalid credentials' });
       }
 
-      await db.query('UPDATE admins SET last_login = CURRENT_TIMESTAMP WHERE id = $1', [admin.id]);
+      await db.query('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1', [schoolAdmin.id]);
 
       const token = generateToken({
-        userId: admin.id,
-        email: admin.email,
-        role: 'admin',
-        isSuperAdmin: admin.is_super_admin
+        userId: schoolAdmin.id,
+        email: schoolAdmin.email,
+        role: 'school_admin',
+        schoolId: schoolAdmin.school_id,
+        isSuperAdmin: false
       });
 
-      console.log('✅ [LOGIN] Admin login SUCCESS');
+      console.log('✅ [LOGIN] School admin login SUCCESS - School:', schoolAdmin.school_id);
       return res.json({
         success: true,
         token,
         user: {
-          id: admin.id,
-          email: admin.email,
-          firstName: admin.first_name,
-          lastName: admin.last_name,
-          role: 'admin',
-          isSuperAdmin: admin.is_super_admin
+          id: schoolAdmin.id,
+          email: schoolAdmin.email,
+          firstName: schoolAdmin.first_name,
+          lastName: schoolAdmin.last_name,
+          role: 'school_admin',
+          schoolId: schoolAdmin.school_id,
+          isSuperAdmin: false
         }
       });
     }
@@ -533,13 +690,22 @@ const getMe = async (req, res) => {
     
     let enrolledSubjects = [];
     if (result.rows[0].role === 'learner') {
-      const enrollments = await db.query(
-        `SELECT e.*, s.name as subject_name, s.code as subject_code 
+      // Get learner's school_id for filtering
+      const learnerSchoolId = result.rows[0].school_id;
+      
+      let enrollmentQuery = `
+        SELECT e.*, s.name as subject_name, s.code as subject_code 
          FROM enrollments e
          JOIN subjects s ON e.subject_id = s.id
-         WHERE e.learner_id = $1 AND e.academic_year = $2`,
-        [req.user.userId, new Date().getFullYear().toString()]
-      );
+         WHERE e.learner_id = $1 AND e.academic_year = $2
+      `;
+      
+      // Apply school filter if learner has school_id
+      if (learnerSchoolId) {
+        enrollmentQuery += ` AND s.school_id = '${learnerSchoolId}'`;
+      }
+      
+      const enrollments = await db.query(enrollmentQuery, [req.user.userId, new Date().getFullYear().toString()]);
       enrolledSubjects = enrollments.rows;
     }
     
@@ -574,4 +740,4 @@ const logout = async (req, res) => {
   res.json({ success: true, message: 'Logged out' });
 };
 
-module.exports = { register, login, getMe, logout, getSubjectsForGrade, autoEnrollLearner };
+module.exports = { register, login, getMe, logout, getCompulsorySubjectsForGrade, autoEnrollLearner };

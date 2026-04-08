@@ -1,0 +1,41 @@
+# Dependencies
+node_modules
+npm-debug.log
+
+# Environment (never include in Docker!)
+.env
+.env.local
+.env.*.local
+.secrets-generated.txt
+
+# Development
+.git
+.gitignore
+.vscode
+.idea
+*.md
+!README.md
+
+# Testing
+coverage
+.nyc_output
+
+# Uploads (will be mounted as volume)
+uploads/*
+!uploads/.gitkeep
+
+# Misc
+.DS_Store
+*.log
+logs
+*.pid
+*.seed
+*.pid.lock
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Scripts
+scripts/

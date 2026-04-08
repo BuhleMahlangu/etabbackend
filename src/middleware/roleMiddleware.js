@@ -12,7 +12,7 @@ const authorize = (...allowedRoles) => {
   };
 };
 
-const isAdmin = authorize('admin');
-const isTeacher = authorize('teacher', 'admin');
+const isAdmin = authorize('admin', 'school_admin');
+const isTeacher = authorize('teacher', 'admin', 'school_admin');
 
 module.exports = { authorize, isAdmin, isTeacher };

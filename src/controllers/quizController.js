@@ -183,7 +183,7 @@ const getAllQuizzes = async (req, res) => {
 
     const result = await db.query(query, params);
 
-    // Get attempt info for learner and filter out completed quizzes
+    // Get attempt info for learner - include ALL quizzes (available and completed)
     if (req.user.role === 'learner') {
       const quizzesWithAttempts = [];
       for (let quiz of result.rows) {
@@ -191,14 +191,16 @@ const getAllQuizzes = async (req, res) => {
           `SELECT id, status, total_score, percentage_score, passed, submitted_at
            FROM quiz_attempts 
            WHERE quiz_id = $1 AND learner_id = $2 AND status IN ('submitted', 'auto_submitted', 'graded')
-           ORDER BY submitted_at DESC LIMIT 1`,
+           ORDER BY submitted_at DESC`,
           [quiz.id, req.user.userId]
         );
-        quiz.myAttempt = attemptResult.rows[0] || null;
-        quiz.attemptsUsed = await getAttemptCount(quiz.id, req.user.userId);
+        quiz.myAttempts = attemptResult.rows || [];
+        quiz.attemptsUsed = attemptResult.rows.length;
         
-        // Only include quiz if learner hasn't used all attempts
-        if (quiz.attemptsUsed < quiz.max_attempts) {
+        // Include quiz if:
+        // 1. Learner has attempts remaining (can retake), OR
+        // 2. Learner has completed it at least once (to view feedback)
+        if (quiz.attemptsUsed < quiz.max_attempts || quiz.attemptsUsed > 0) {
           quizzesWithAttempts.push(quiz);
         }
       }
@@ -613,6 +615,53 @@ const submitQuiz = async (req, res) => {
 };
 
 // ============================================
+// GET STUDENT'S QUIZ RESULTS (Teacher/Admin)
+// ============================================
+const getStudentQuizResults = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const teacherId = req.user.userId;
+    const userRole = req.user.role;
+    const userSchoolId = req.user.schoolId;
+
+    // Build base query
+    let query = `
+      SELECT qa.*, 
+             q.title as quiz_title, q.subject_id, q.passing_score,
+             m.name as subject_name, m.code as subject_code,
+             u.first_name || ' ' || u.last_name as teacher_name
+      FROM quiz_attempts qa
+      JOIN quizzes q ON qa.quiz_id = q.id
+      JOIN modules m ON q.subject_id = m.id
+      JOIN users u ON q.teacher_id = u.id
+      WHERE qa.learner_id = $1 AND qa.status IN ('submitted', 'auto_submitted', 'graded')
+    `;
+    let params = [studentId];
+
+    // If teacher (not admin), only show results for quizzes they created
+    if (userRole === 'teacher') {
+      query += ` AND q.teacher_id = $${params.length + 1}`;
+      params.push(teacherId);
+    }
+
+    // Apply school filter
+    if (userSchoolId) {
+      query += ` AND m.school_id = '${userSchoolId}'`;
+    }
+
+    query += ` ORDER BY qa.submitted_at DESC`;
+
+    const result = await db.query(query, params);
+
+    res.json({ success: true, data: result.rows });
+
+  } catch (error) {
+    console.error('Get student quiz results error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch student quiz results' });
+  }
+};
+
+// ============================================
 // GET MY QUIZ RESULTS (Learner)
 // ============================================
 const getMyQuizResults = async (req, res) => {
@@ -623,6 +672,7 @@ const getMyQuizResults = async (req, res) => {
     let query = `
       SELECT qa.*, 
              q.title as quiz_title, q.subject_id, q.passing_score,
+             q.show_correct_answers,
              m.name as subject_name, m.code as subject_code,
              u.first_name || ' ' || u.last_name as teacher_name
       FROM quiz_attempts qa
@@ -644,15 +694,22 @@ const getMyQuizResults = async (req, res) => {
 
     // Get details for each attempt
     for (let attempt of result.rows) {
+      // Check if correct answers should be shown
+      const showCorrectAnswers = attempt.show_correct_answers;
+      
       const answersResult = await db.query(
-        `SELECT qa.*, qq.question_text, qq.question_type, qq.correct_answer, 
-                qq.correct_answers, qq.explanation
+        `SELECT qa.*, qq.question_text, qq.question_type, qq.options,
+                qq.points as max_points,
+                CASE WHEN $2 = true THEN qq.correct_answer ELSE NULL END as correct_answer,
+                CASE WHEN $2 = true THEN qq.correct_answers ELSE NULL END as correct_answers,
+                CASE WHEN $2 = true THEN qq.explanation ELSE NULL END as explanation
          FROM quiz_answers qa
          JOIN quiz_questions qq ON qa.question_id = qq.id
          WHERE qa.attempt_id = $1`,
-        [attempt.id]
+        [attempt.id, showCorrectAnswers]
       );
       attempt.answers = answersResult.rows;
+      attempt.feedbackAvailable = showCorrectAnswers;
     }
 
     res.json({ success: true, data: result.rows });
@@ -1178,6 +1235,109 @@ const getQuizAttempts = async (req, res) => {
   }
 };
 
+// ============================================
+// EXTEND QUIZ DUE DATE
+// ============================================
+const extendDueDate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newDueDate, reason } = req.body;
+    const teacherId = req.user.userId;
+
+    if (!newDueDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'New due date is required'
+      });
+    }
+
+    // Get current quiz
+    const quizResult = await db.query(
+      `SELECT q.*, m.name as subject_name, m.id as subject_id
+       FROM quizzes q
+       JOIN modules m ON q.subject_id = m.id
+       WHERE q.id = $1`,
+      [id]
+    );
+
+    if (quizResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Quiz not found' });
+    }
+
+    const quiz = quizResult.rows[0];
+
+    // Verify teacher owns this quiz
+    if (quiz.teacher_id !== teacherId && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    // Store original due date if not already stored
+    const originalDueDate = quiz.original_due_date || quiz.available_until;
+
+    // Update quiz with extension
+    const updateResult = await db.query(
+      `UPDATE quizzes 
+       SET available_until = $1,
+           original_due_date = $2,
+           extended_due_date = $1,
+           extended_at = NOW(),
+           extended_by = $3,
+           extension_reason = $4,
+           updated_at = NOW()
+       WHERE id = $5
+       RETURNING *`,
+      [newDueDate, originalDueDate, teacherId, reason || null, id]
+    );
+
+    const updatedQuiz = updateResult.rows[0];
+
+    // Get enrolled students to notify
+    const studentsResult = await db.query(
+      `SELECT DISTINCT lm.learner_id 
+       FROM learner_modules lm
+       WHERE lm.module_id = $1 
+       AND lm.status = 'active'
+       AND ($2 = '{}' OR lm.grade_id = ANY($2))`,
+      [quiz.subject_id, quiz.applicable_grade_ids]
+    );
+
+    const studentIds = studentsResult.rows.map(r => r.learner_id);
+
+    // Create notifications for all enrolled students
+    if (studentIds.length > 0) {
+      const notificationValues = studentIds.map(studentId => {
+        return `('${studentId}', 'deadline_extended', 'Quiz Deadline Extended', 
+                'The deadline for "${quiz.title}" in ${quiz.subject_name} has been extended to ${new Date(newDueDate).toLocaleString()}. ${reason ? 'Reason: ' + reason : ''}', 
+                false, NOW(), '${quiz.subject_id}', NULL, '${id}')`;
+      }).join(', ');
+
+      await db.query(
+        `INSERT INTO notifications 
+          (user_id, type, title, message, is_read, created_at, related_subject_id, related_assignment_id, related_quiz_id)
+         VALUES ${notificationValues}`
+      );
+
+      // Log the extension
+      await db.query(
+        `INSERT INTO due_date_extension_notifications 
+          (item_type, item_id, subject_id, teacher_id, original_due_date, new_due_date, reason, notified_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        ['quiz', id, quiz.subject_id, teacherId, originalDueDate, newDueDate, reason || null, studentIds.length]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: `Quiz due date extended successfully. ${studentIds.length} students notified.`,
+      data: updatedQuiz
+    });
+
+  } catch (error) {
+    console.error('Extend quiz due date error:', error);
+    res.status(500).json({ success: false, message: 'Failed to extend due date' });
+  }
+};
+
 module.exports = {
   createQuiz,
   getAllQuizzes,
@@ -1193,5 +1353,7 @@ module.exports = {
   getMyQuizResults,
   getQuizStatistics,
   getAttemptForReview,
-  overrideAnswerMark
+  overrideAnswerMark,
+  getStudentQuizResults,
+  extendDueDate
 };

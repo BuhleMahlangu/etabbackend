@@ -3,12 +3,14 @@
 require('dotenv').config();
 
 const express = require('express');
+const http = require('http');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./config/swagger');
+const { initializeSocket } = require('./config/socket');
 
 // Import all routes AFTER dotenv.config()
 const subjectRoutes = require('./routes/subjectRoutes');
@@ -27,21 +29,34 @@ const assignmentRoutes = require('./routes/assignmentRoutes');
 const progressRoutes = require('./routes/progressRoutes');
 const supportRoutes = require('./routes/supportRoutes');
 const subjectMessageRoutes = require('./routes/subjectMessageRoutes');
+const aiTutorRoutes = require('./routes/aiTutorRoutes');
+const schoolRoutes = require('./routes/schoolRoutes');
+const downloadRoutes = require('./routes/downloadRoutes');
+const settingsRoutes = require('./routes/settingsRoutes');
 
 const app = express();
 
 // Security middleware
 app.use(helmet());
 
-// CORS - Support multiple origins
+// CORS - Support multiple origins (PERMISSIVE in development)
+const isDev = process.env.NODE_ENV !== 'production';
 const corsOrigins = process.env.CORS_ORIGIN 
   ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
-  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175'];
+  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:3000'];
+
+console.log('[CORS] Allowed origins:', corsOrigins, isDev ? '(DEV MODE - allowing all localhost)' : '');
 
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
+    
+    // In development, allow ALL origins (permissive for debugging)
+    if (isDev) {
+      console.log('[CORS] DEV MODE - Allowing origin:', origin);
+      return callback(null, true);
+    }
     
     if (corsOrigins.indexOf(origin) !== -1 || corsOrigins.includes('*')) {
       callback(null, true);
@@ -52,8 +67,14 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Length', 'X-Requested-With'],
+  preflightContinue: false,
+  optionsSuccessStatus: 200
 }));
+
+// Explicitly handle OPTIONS requests for all routes
+app.options('*', cors());
 
 // ============================================
 // FIXED: Rate limiting - More lenient for development
@@ -141,6 +162,40 @@ app.get('/api/test', (req, res) => {
 });
 
 // ============================================
+// DEBUG: Public subjects test (no auth required)
+// ============================================
+app.get('/api/debug/subjects', async (req, res) => {
+  try {
+    const db = require('./config/database');
+    const { school } = req.query;
+    
+    let query = 'SELECT code, name, phase, school_code FROM subjects';
+    let params = [];
+    
+    if (school) {
+      query += ' WHERE school_code = $1';
+      params.push(school);
+    }
+    
+    query += ' ORDER BY school_code, phase, name LIMIT 20';
+    
+    const result = await db.query(query, params);
+    
+    res.json({
+      success: true,
+      count: result.rows.length,
+      school: school || 'all',
+      subjects: result.rows
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ============================================
 // ADDED: Database connection test
 // ============================================
 const db = require('./config/database');
@@ -167,6 +222,8 @@ app.use('/api/users', userRoutes);
 app.use('/api/subjects', subjectRoutes);
 app.use('/api/materials', materialRoutes);
 app.use('/api/admin', adminRoutes);
+// Alias for frontend compatibility (some frontends call /admin instead of /api/admin)
+app.use('/admin', adminRoutes);
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/deadlines', deadlineRoutes);
 app.use('/api/notifications', notificationRoutes);
@@ -178,6 +235,20 @@ app.use('/api/assignments', assignmentRoutes);
 app.use('/api/progress', progressRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/subject-messages', subjectMessageRoutes);
+app.use('/api/ai-tutor', aiTutorRoutes);
+app.use('/api/schools', schoolRoutes);
+app.use('/api/download', downloadRoutes);
+app.use('/api/settings', settingsRoutes);
+
+// TEST ENDPOINT - Direct admin subjects test
+app.get('/test-admin-subjects', async (req, res) => {
+  try {
+    const result = await db.query('SELECT COUNT(*) as count FROM subjects');
+    res.json({ success: true, totalSubjects: result.rows[0].count });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
 
 // 404 handler
 app.use((req, res) => {
@@ -203,7 +274,16 @@ const PORT = process.env.PORT || 5000;
 // Check Cloudinary on startup
 const cloudinaryReady = checkCloudinaryConfig();
 
-app.listen(PORT, () => {
+// Create HTTP server
+const server = http.createServer(app);
+
+// Initialize Socket.IO
+const io = initializeSocket(server);
+
+// Make io available globally for controllers
+global.io = io;
+
+server.listen(PORT, () => {
   console.log(`
   🎓 E-tab Server Running
   =======================
@@ -213,6 +293,7 @@ app.listen(PORT, () => {
   Database: ${process.env.DB_NAME || 'Not configured'}
   Cloudinary: ${cloudinaryReady ? '✅ Configured' : '⚠️  Check config'}
   Rate Limit: ${process.env.NODE_ENV === 'development' ? '⚠️ SKIPPED (DEV)' : '✅ 1000 req/15min'}
+  WebSocket: ✅ Real-time enabled
   =======================
   API: http://localhost:${PORT}/api
   Docs: http://localhost:${PORT}/api-docs

@@ -200,11 +200,77 @@ const getForUser = async (req, res) => {
   }
 };
 
+// ============================================
+// SEND GLOBAL NOTIFICATION TO ALL USERS (Super Admin only)
+// ============================================
+const sendGlobalNotification = async (req, res) => {
+  try {
+    const { title, message, type = 'announcement' } = req.body;
+    const userSchoolId = req.user.schoolId;
+
+    if (!title || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Title and message are required' 
+      });
+    }
+
+    // Get all active users in the system (filtered by school for school_admin)
+    let usersQuery = `
+      SELECT id FROM users 
+      WHERE is_active = true 
+      AND role IN ('learner', 'teacher', 'school_admin')
+    `;
+    
+    if (userSchoolId) {
+      usersQuery += ` AND school_id = '${userSchoolId}'`;
+    }
+
+    const usersResult = await db.query(usersQuery);
+    const userIds = usersResult.rows.map(u => u.id);
+
+    if (userIds.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No users found to notify' 
+      });
+    }
+
+    // Insert notification for each user
+    const notificationValues = userIds.map(userId => {
+      return `('${userId}', '${type}', '${title.replace(/'/g, "''")}', '${message.replace(/'/g, "''")}', false, NOW())`;
+    }).join(', ');
+
+    const insertQuery = `
+      INSERT INTO notifications 
+        (user_id, type, title, message, is_read, created_at)
+      VALUES ${notificationValues}
+      RETURNING id
+    `;
+
+    const result = await db.query(insertQuery);
+
+    res.json({
+      success: true,
+      message: `Notification sent to ${userIds.length} users`,
+      data: {
+        recipientsCount: userIds.length,
+        notificationIds: result.rows.map(r => r.id)
+      }
+    });
+
+  } catch (error) {
+    console.error('Send global notification error:', error);
+    res.status(500).json({ success: false, message: 'Failed to send global notification' });
+  }
+};
+
 module.exports = {
   getMyNotifications,
   markAsRead,
   markAllAsRead,
   deleteNotification,
   getNotificationStats,
-  getForUser
+  getForUser,
+  sendGlobalNotification
 };

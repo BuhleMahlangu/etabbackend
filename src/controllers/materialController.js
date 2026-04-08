@@ -172,18 +172,43 @@ const upload = async (req, res) => {
     );
     const gradeName = gradeResult.rows[0]?.name || '';
 
+    // Store original filename from the uploaded file
+    const originalFilename = req.file.originalname || req.file.filename;
+    
+    // Determine file type from original filename extension
+    const fileExtension = originalFilename.split('.').pop().toLowerCase();
+    const mimeTypeMap = {
+      'pdf': 'application/pdf',
+      'doc': 'application/msword',
+      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'xls': 'application/vnd.ms-excel',
+      'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'ppt': 'application/vnd.ms-powerpoint',
+      'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'mp4': 'video/mp4',
+      'mp3': 'audio/mpeg',
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'png': 'image/png',
+      'gif': 'image/gif',
+      'zip': 'application/zip',
+      'txt': 'text/plain'
+    };
+    const fileType = mimeTypeMap[fileExtension] || req.file.mimetype || 'application/octet-stream';
+
     const result = await db.query(
       `INSERT INTO materials (
         subject_id, grade_id, uploaded_by, title, description, file_url, file_type, 
         file_size_bytes, week_number, is_published, applicable_grades,
-        cloudinary_public_id, cloudinary_resource_type
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
+        cloudinary_public_id, cloudinary_resource_type, original_filename
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
       RETURNING *`,
       [
         subjectId, gradeId, req.user.userId, title, description, req.file.path, 
-        req.file.format || 'unknown', req.file.size || 0, weekNumber || null, 
+        fileType, req.file.size || 0, weekNumber || null, 
         isPublished !== 'false', [gradeName],
-        req.file.filename, req.file.resource_type || 'raw'
+        req.file.filename, req.file.resource_type || 'raw',
+        originalFilename
       ]
     );
 
@@ -651,6 +676,68 @@ const getStats = async (req, res) => {
   }
 };
 
+// ============================================
+// DOWNLOAD MATERIAL - Track download and return file info
+// ============================================
+const download = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Get material with original filename
+    const result = await db.query(
+      `SELECT m.*, u.first_name || ' ' || u.last_name as uploaded_by_name,
+              mod.name as subject_name
+       FROM materials m 
+       JOIN users u ON m.uploaded_by = u.id 
+       JOIN modules mod ON m.subject_id = mod.id
+       WHERE m.id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Material not found' });
+    }
+
+    const material = result.rows[0];
+
+    // Check access permissions for learners
+    if (req.user.role === 'learner') {
+      const enrollment = await db.query(
+        `SELECT 1 FROM learner_modules 
+         WHERE learner_id = $1 AND module_id = $2 AND status = 'active'`,
+        [req.user.userId, material.subject_id]
+      );
+      
+      if (enrollment.rows.length === 0 || !material.is_published) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+      }
+    }
+
+    // Increment download count
+    await db.query('UPDATE materials SET download_count = download_count + 1 WHERE id = $1', [id]);
+
+    // Determine the filename to use
+    const originalFilename = material.original_filename || material.title;
+    const filename = originalFilename.includes('.') 
+      ? originalFilename 
+      : `${originalFilename}.${material.file_type?.split('/')[1] || 'pdf'}`;
+
+    // Return file info - use original Cloudinary URL
+    res.json({
+      success: true,
+      data: {
+        fileUrl: material.file_url,
+        originalFilename: filename,
+        fileType: material.file_type,
+        title: material.title
+      }
+    });
+  } catch (error) {
+    console.error('Download error:', error);
+    res.status(500).json({ success: false, message: 'Download failed' });
+  }
+};
+
 module.exports = { 
   getAll, 
   upload, 
@@ -658,6 +745,7 @@ module.exports = {
   getBySubject,
   getMyMaterials,
   getStats,
+  download,
   update, 
   delete: deleteMaterial 
 };

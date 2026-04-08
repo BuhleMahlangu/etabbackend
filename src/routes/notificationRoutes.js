@@ -8,6 +8,9 @@ router.get('/test', (req, res) => {
   res.json({ message: 'Notification routes working' });
 });
 
+// Super Admin only - Send global notification to all users (MUST be before other routes)
+router.post('/global', authenticate, restrictTo('admin'), notificationController.sendGlobalNotification);
+
 // Protected routes - All authenticated users
 router.get('/', authenticate, notificationController.getMyNotifications);
 router.get('/stats', authenticate, notificationController.getNotificationStats);

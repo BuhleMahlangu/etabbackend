@@ -40,16 +40,34 @@ const updateMarks = async (req, res) => {
 const processGradeProgression = async (req, res) => {
   try {
     const { learnerId } = req.params;
+    const { schoolId, isSuperAdmin } = req.user;
     const academicYear = new Date().getFullYear().toString();
 
-    // Get all enrollments for current year
-    const enrollments = await db.query(
-      `SELECT e.*, s.name as subject_name
+    // Verify permission - only super admins or same school admins can process progression
+    if (!isSuperAdmin && schoolId) {
+      const learnerCheck = await db.query(
+        'SELECT school_id FROM users WHERE id = $1',
+        [learnerId]
+      );
+      if (learnerCheck.rows.length === 0 || learnerCheck.rows[0].school_id !== schoolId) {
+        return res.status(403).json({ success: false, message: 'Not authorized to process this learner' });
+      }
+    }
+
+    // Get all enrollments for current year (school-filtered)
+    let enrollmentsQuery = `
+      SELECT e.*, s.name as subject_name
        FROM enrollments e
        JOIN subjects s ON e.subject_id = s.id
-       WHERE e.learner_id = $1 AND e.academic_year = $2`,
-      [learnerId, academicYear]
-    );
+       WHERE e.learner_id = $1 AND e.academic_year = $2
+    `;
+    
+    // Apply school filter for non-super-admins
+    if (!isSuperAdmin && schoolId) {
+      enrollmentsQuery += ` AND s.school_id = '${schoolId}'`;
+    }
+    
+    const enrollments = await db.query(enrollmentsQuery, [learnerId, academicYear]);
 
     if (enrollments.rows.length === 0) {
       return res.status(400).json({ success: false, message: 'No enrollments found' });
@@ -73,13 +91,17 @@ const processGradeProgression = async (req, res) => {
     );
 
     if (allPassed && nextGrade) {
+      // Get learner's school_id
+      const learnerResult = await db.query('SELECT school_id FROM users WHERE id = $1', [learnerId]);
+      const schoolId = learnerResult.rows[0]?.school_id;
+      
       // Promote to next grade
       await db.query('UPDATE users SET current_grade = $1 WHERE id = $2', [nextGrade, learnerId]);
       
-      // Auto-enroll in new grade subjects
+      // Auto-enroll in new grade subjects (school-aware)
       const { autoEnrollLearner } = require('./authController');
       const newAcademicYear = (parseInt(academicYear) + 1).toString();
-      await autoEnrollLearner(learnerId, nextGrade, newAcademicYear);
+      await autoEnrollLearner(learnerId, nextGrade, newAcademicYear, schoolId);
 
       // Notify student
       await db.query(
@@ -119,16 +141,36 @@ const processGradeProgression = async (req, res) => {
 const getReport = async (req, res) => {
   try {
     const { learnerId } = req.params;
+    const { schoolId, isSuperAdmin } = req.user;
     const academicYear = req.query.year || new Date().getFullYear().toString();
 
-    const result = await db.query(
-      `SELECT e.*, s.name as subject_name, s.code as subject_code, s.credits
+    // Verify permission - only super admins or same school admins/teachers can view reports
+    if (!isSuperAdmin && schoolId) {
+      const learnerCheck = await db.query(
+        'SELECT school_id FROM users WHERE id = $1',
+        [learnerId]
+      );
+      if (learnerCheck.rows.length === 0 || learnerCheck.rows[0].school_id !== schoolId) {
+        return res.status(403).json({ success: false, message: 'Not authorized to view this report' });
+      }
+    }
+
+    // Build school-filtered query
+    let query = `
+      SELECT e.*, s.name as subject_name, s.code as subject_code, s.credits
        FROM enrollments e
        JOIN subjects s ON e.subject_id = s.id
        WHERE e.learner_id = $1 AND e.academic_year = $2
-       ORDER BY s.name`,
-      [learnerId, academicYear]
-    );
+    `;
+    
+    // Apply school filter for non-super-admins
+    if (!isSuperAdmin && schoolId) {
+      query += ` AND s.school_id = '${schoolId}'`;
+    }
+    
+    query += ` ORDER BY s.name`;
+
+    const result = await db.query(query, [learnerId, academicYear]);
 
     // Calculate overall average
     const marks = result.rows.filter(r => r.final_mark !== null).map(r => parseFloat(r.final_mark));
@@ -148,12 +190,14 @@ const getReport = async (req, res) => {
   }
 };
 
-// Get learner's enrolled subjects (for materials page) - FIXED to use learner_modules
+// Get learner's enrolled subjects (for materials page) - FIXED to use learner_modules with school filter
 const getMySubjects = async (req, res) => {
   try {
     const learnerId = req.user.userId;
+    const userSchoolId = req.user.schoolId;
 
-    const result = await db.query(`
+    // Base query with school filter
+    let query = `
       SELECT 
         m.id as subject_id,
         m.name as subject_name,
@@ -169,8 +213,19 @@ const getMySubjects = async (req, res) => {
       JOIN grades g ON lm.grade_id = g.id
       WHERE lm.learner_id = $1 
       AND lm.status = 'active'
-      ORDER BY m.name
-    `, [learnerId]);
+    `;
+    
+    let params = [learnerId];
+    
+    // Add school filter if user has school_id
+    if (userSchoolId) {
+      query += ` AND m.school_id = $2`;
+      params.push(userSchoolId);
+    }
+    
+    query += ` ORDER BY m.name`;
+
+    const result = await db.query(query, params);
 
     res.json({
       success: true,
@@ -195,10 +250,11 @@ const getMySubjects = async (req, res) => {
   }
 };
 
-// Get enrollment history for FET phase (Grades 10-12) - FIXED to use learner_modules
+// Get enrollment history for FET phase (Grades 10-12) - FIXED to use learner_modules with school filter
 const getEnrollmentHistory = async (req, res) => {
   try {
     const learnerId = req.user.userId;
+    const userSchoolId = req.user.schoolId;
     const { phase } = req.query; // 'fet' for grades 10-12, 'all' for all history
 
     // Get user's grade info to determine current grade
@@ -215,7 +271,15 @@ const getEnrollmentHistory = async (req, res) => {
       gradeFilter = `AND g.level >= 10 AND g.level <= 12`;
     }
 
-    // Query learner_modules (the correct table for current system)
+    // Query learner_modules with school filter
+    let schoolFilter = '';
+    let params = [learnerId, userGradeId];
+    
+    if (userSchoolId) {
+      schoolFilter = `AND m.school_id = $3`;
+      params.push(userSchoolId);
+    }
+
     const result = await db.query(`
       SELECT 
         m.id as subject_id,
@@ -234,9 +298,10 @@ const getEnrollmentHistory = async (req, res) => {
       JOIN grades g ON lm.grade_id = g.id
       WHERE lm.learner_id = $1 
       ${gradeFilter}
+      ${schoolFilter}
       AND lm.status = 'active'
       ORDER BY g.level DESC, m.name
-    `, [learnerId, userGradeId]);
+    `, params);
 
     // Group by grade for easier frontend display
     const groupedByGrade = result.rows.reduce((acc, row) => {
@@ -306,4 +371,52 @@ const getEnrollmentHistory = async (req, res) => {
   }
 };
 
-module.exports = { updateMarks, processGradeProgression, getReport, getMySubjects, getEnrollmentHistory };
+// Get my enrollments with full details
+const getMyEnrollments = async (req, res) => {
+  try {
+    const learnerId = req.user.userId;
+    const userSchoolId = req.user.schoolId;
+
+    let query = `
+      SELECT 
+        lm.id as enrollment_id,
+        lm.module_id as subject_id,
+        lm.grade_id,
+        lm.status,
+        lm.enrolled_at,
+        lm.progress_percent,
+        m.name as subject_name,
+        m.code as subject_code,
+        g.name as grade_name,
+        g.level as grade_level
+      FROM learner_modules lm
+      JOIN modules m ON lm.module_id = m.id
+      JOIN grades g ON lm.grade_id = g.id
+      WHERE lm.learner_id = $1 
+      AND lm.status = 'active'
+    `;
+    
+    let params = [learnerId];
+    let paramIndex = 1;
+    
+    if (userSchoolId) {
+      query += ` AND m.school_id = $${++paramIndex}`;
+      params.push(userSchoolId);
+    }
+    
+    query += ` ORDER BY g.level, m.name`;
+
+    const result = await db.query(query, params);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get my enrollments error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch enrollments' });
+  }
+};
+
+module.exports = { updateMarks, processGradeProgression, getReport, getMySubjects, getEnrollmentHistory, getMyEnrollments };

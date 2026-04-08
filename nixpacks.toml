@@ -1,0 +1,16 @@
+# Nixpacks configuration for Railway deployment
+# Alternative to Docker - Railway can build directly from this
+
+[phases.build]
+cmds = [
+  "npm ci --production"
+]
+
+[phases.setup]
+nixPkgs = [
+  "nodejs_20",
+  "postgresql"
+]
+
+[start]
+cmd = "npm start"

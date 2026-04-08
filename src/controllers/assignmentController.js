@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const https = require('https');
 
 // ============================================
 // CREATE ASSIGNMENT (Teacher/Admin only)
@@ -127,23 +128,28 @@ const getAllAssignments = async (req, res) => {
     let params = [];
     let paramCount = 0;
 
-    // For learners - only show published assignments for their enrolled subjects AND grades
+    // For learners - only show published assignments for their enrolled subjects AND grades (same school)
     if (req.user.role === 'learner') {
       const userResult = await db.query(
-        'SELECT grade_id FROM users WHERE id = $1',
+        'SELECT grade_id, school_id FROM users WHERE id = $1',
         [req.user.userId]
       );
       const userGradeId = userResult.rows[0]?.grade_id;
+      const userSchoolId = userResult.rows[0]?.school_id;
       
       query += ` AND a.is_published = true 
                  AND a.status = 'published'
                  AND a.subject_id IN (
-                   SELECT module_id FROM learner_modules 
-                   WHERE learner_id = $${++paramCount} AND status = 'active'
+                   SELECT lm.module_id 
+                   FROM learner_modules lm
+                   JOIN modules m ON lm.module_id = m.id
+                   WHERE lm.learner_id = $${++paramCount} 
+                   AND lm.status = 'active'
+                   AND m.school_id = $${++paramCount}
                  )
                  AND ($${++paramCount} = ANY(a.applicable_grade_ids) OR a.applicable_grade_ids = '{}')
                  AND (a.available_from IS NULL OR a.available_from <= NOW())`;
-      params.push(req.user.userId, userGradeId);
+      params.push(req.user.userId, userSchoolId, userGradeId);
     }
 
     // Filter by subject
@@ -183,20 +189,25 @@ const getAllAssignments = async (req, res) => {
 
     if (req.user.role === 'learner') {
       const userResult = await db.query(
-        'SELECT grade_id FROM users WHERE id = $1',
+        'SELECT grade_id, school_id FROM users WHERE id = $1',
         [req.user.userId]
       );
       const userGradeId = userResult.rows[0]?.grade_id;
+      const userSchoolId = userResult.rows[0]?.school_id;
       
       countQuery += ` AND a.is_published = true 
                       AND a.status = 'published'
                       AND a.subject_id IN (
-                        SELECT module_id FROM learner_modules 
-                        WHERE learner_id = $${++countParamCount} AND status = 'active'
+                        SELECT lm.module_id 
+                        FROM learner_modules lm
+                        JOIN modules m ON lm.module_id = m.id
+                        WHERE lm.learner_id = $${++countParamCount} 
+                        AND lm.status = 'active'
+                        AND m.school_id = $${++countParamCount}
                       )
                       AND ($${++countParamCount} = ANY(a.applicable_grade_ids) OR a.applicable_grade_ids = '{}')
                       AND (a.available_from IS NULL OR a.available_from <= NOW())`;
-      countParams.push(req.user.userId, userGradeId);
+      countParams.push(req.user.userId, userSchoolId, userGradeId);
     }
 
     if (subjectId) {
@@ -248,11 +259,13 @@ const getAssignmentById = async (req, res) => {
     const { id } = req.params;
     const userId = req.user.userId;
     const userRole = req.user.role;
+    const userSchoolId = req.user.schoolId;
 
     const result = await db.query(
       `SELECT a.*, 
               u.first_name || ' ' || u.last_name as teacher_name,
-              m.name as subject_name, m.code as subject_code
+              m.name as subject_name, m.code as subject_code,
+              m.school_id as subject_school_id
        FROM assignments a
        JOIN users u ON a.teacher_id = u.id
        JOIN modules m ON a.subject_id = m.id
@@ -265,6 +278,11 @@ const getAssignmentById = async (req, res) => {
     }
 
     const assignment = result.rows[0];
+
+    // Verify assignment belongs to user's school (for all users)
+    if (userSchoolId && assignment.subject_school_id !== userSchoolId) {
+      return res.status(403).json({ success: false, message: 'Assignment not available for your school' });
+    }
 
     // Check access for learners
     if (userRole === 'learner') {
@@ -324,7 +342,7 @@ const updateAssignment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Assignment not found' });
     }
 
-    if (req.user.role !== 'admin' && existing.rows[0].teacher_id !== req.user.userId) {
+    if (!['admin', 'school_admin'].includes(req.user.role) && existing.rows[0].teacher_id !== req.user.userId) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -389,7 +407,7 @@ const deleteAssignment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Assignment not found' });
     }
 
-    if (req.user.role !== 'admin' && existing.rows[0].teacher_id !== req.user.userId) {
+    if (!['admin', 'school_admin'].includes(req.user.role) && existing.rows[0].teacher_id !== req.user.userId) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -474,30 +492,68 @@ const submitAssignment = async (req, res) => {
     // Handle file upload data
     let fileUrl = null;
     let fileName = null;
+    let originalFilename = null;
     let fileType = null;
+    let fileSize = 0;
     
     if (file) {
-      console.log('[submitAssignment] File received:', file.originalname);
+      console.log('[submitAssignment] File object keys:', Object.keys(file));
+      console.log('[submitAssignment] File details:', {
+        originalname: file.originalname,
+        filename: file.filename,
+        mimetype: file.mimetype,
+        size: file.size,
+        path: file.path ? 'present' : 'missing',
+        format: file.format,
+        public_id: file.public_id
+      });
+      
       fileUrl = file.path || file.secure_url || null;
-      fileName = file.originalname || file.original_name || null;
+      originalFilename = file.originalname || file.original_name || 'submission';
+      fileName = file.filename || file.public_id || null;
       fileType = file.mimetype || file.format || null;
+      fileSize = file.size || 0;
+      
+      // Extract extension for file type detection
+      const fileExtension = originalFilename.split('.').pop().toLowerCase();
+      if (!fileType && fileExtension) {
+        const mimeTypeMap = {
+          'pdf': 'application/pdf',
+          'doc': 'application/msword',
+          'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'xls': 'application/vnd.ms-excel',
+          'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'ppt': 'application/vnd.ms-powerpoint',
+          'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          'txt': 'text/plain',
+          'jpg': 'image/jpeg',
+          'jpeg': 'image/jpeg',
+          'png': 'image/png',
+          'gif': 'image/gif',
+          'mp4': 'video/mp4',
+          'mp3': 'audio/mpeg',
+          'zip': 'application/zip'
+        };
+        fileType = mimeTypeMap[fileExtension] || 'application/octet-stream';
+      }
     }
 
     console.log('[submitAssignment] Inserting submission:', {
       text: submissionText ? 'yes' : 'no',
       url: submissionUrl ? 'yes' : 'no',
-      file: fileUrl ? 'yes' : 'no'
+      file: fileUrl ? 'yes' : 'no',
+      originalFilename: originalFilename
     });
 
     // Create submission
     const result = await db.query(
       `INSERT INTO assignment_submissions 
-        (assignment_id, learner_id, submission_text, submission_url, file_url, file_name, file_type, is_late, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'submitted')
+        (assignment_id, learner_id, submission_text, submission_url, file_url, file_name, original_filename, file_type, file_size, is_late, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'submitted')
        RETURNING *`,
       [
         assignmentId, learnerId, submissionText, submissionUrl,
-        fileUrl, fileName, fileType, isLate
+        fileUrl, fileName, originalFilename, fileType, fileSize, isLate
       ]
     );
 
@@ -516,12 +572,20 @@ const submitAssignment = async (req, res) => {
 };
 
 // ============================================
-// GET MY ASSIGNMENTS (Learner)
+// GET MY ASSIGNMENTS (Learner) - School Aware
 // ============================================
 const getMyAssignments = async (req, res) => {
   try {
     const learnerId = req.user.userId;
     const { status } = req.query;
+
+    // Get user's grade and school
+    const userResult = await db.query(
+      'SELECT grade_id, school_id FROM users WHERE id = $1',
+      [learnerId]
+    );
+    const userGradeId = userResult.rows[0]?.grade_id;
+    const userSchoolId = userResult.rows[0]?.school_id;
 
     let query = `
       SELECT a.*, 
@@ -542,20 +606,17 @@ const getMyAssignments = async (req, res) => {
       WHERE a.is_published = true 
       AND a.status = 'published'
       AND a.subject_id IN (
-        SELECT module_id FROM learner_modules 
-        WHERE learner_id = $1 AND status = 'active'
+        SELECT lm.module_id 
+        FROM learner_modules lm
+        JOIN modules mod ON lm.module_id = mod.id
+        WHERE lm.learner_id = $1 
+        AND lm.status = 'active'
+        AND mod.school_id = $2
       )
-      AND ($2 = ANY(a.applicable_grade_ids) OR a.applicable_grade_ids = '{}')
+      AND ($3 = ANY(a.applicable_grade_ids) OR a.applicable_grade_ids = '{}')
       AND (a.available_from IS NULL OR a.available_from <= NOW())
     `;
-    let params = [learnerId];
-
-    // Get user's grade
-    const userResult = await db.query(
-      'SELECT grade_id FROM users WHERE id = $1',
-      [learnerId]
-    );
-    params.push(userResult.rows[0]?.grade_id);
+    let params = [learnerId, userSchoolId, userGradeId];
 
     // Filter by status
     if (status === 'pending') {
@@ -579,19 +640,20 @@ const getMyAssignments = async (req, res) => {
 };
 
 // ============================================
-// GET UPCOMING DEADLINES (for learner dashboard)
+// GET UPCOMING DEADLINES (for learner dashboard) - School Aware
 // ============================================
 const getUpcomingDeadlines = async (req, res) => {
   try {
     const learnerId = req.user.userId;
     const limit = req.query.limit || 5;
 
-    // Get user's grade
+    // Get user's grade and school
     const userResult = await db.query(
-      'SELECT grade_id FROM users WHERE id = $1',
+      'SELECT grade_id, school_id FROM users WHERE id = $1',
       [learnerId]
     );
     const userGradeId = userResult.rows[0]?.grade_id;
+    const userSchoolId = userResult.rows[0]?.school_id;
 
     const query = `
       SELECT a.id, a.title, a.due_date, a.max_marks,
@@ -604,17 +666,21 @@ const getUpcomingDeadlines = async (req, res) => {
       WHERE a.is_published = true 
       AND a.status = 'published'
       AND a.subject_id IN (
-        SELECT module_id FROM learner_modules 
-        WHERE learner_id = $1 AND status = 'active'
+        SELECT lm.module_id 
+        FROM learner_modules lm
+        JOIN modules mod ON lm.module_id = mod.id
+        WHERE lm.learner_id = $1 
+        AND lm.status = 'active'
+        AND mod.school_id = $2
       )
-      AND ($2 = ANY(a.applicable_grade_ids) OR a.applicable_grade_ids = '{}')
+      AND ($3 = ANY(a.applicable_grade_ids) OR a.applicable_grade_ids = '{}')
       AND a.due_date >= NOW()
       AND s.id IS NULL
       ORDER BY a.due_date ASC
-      LIMIT $3
+      LIMIT $4
     `;
 
-    const result = await db.query(query, [learnerId, userGradeId, limit]);
+    const result = await db.query(query, [learnerId, userSchoolId, userGradeId, limit]);
 
     res.json({ success: true, data: result.rows });
 
@@ -631,10 +697,14 @@ const getAssignmentSubmissions = async (req, res) => {
   try {
     const { assignmentId } = req.params;
     const teacherId = req.user.userId;
+    const userSchoolId = req.user.schoolId;
 
-    // Verify teacher owns the assignment
+    // Verify teacher owns the assignment (and it's in their school)
     const assignmentCheck = await db.query(
-      'SELECT teacher_id FROM assignments WHERE id = $1',
+      `SELECT a.teacher_id, m.school_id 
+       FROM assignments a
+       JOIN modules m ON a.subject_id = m.id
+       WHERE a.id = $1`,
       [assignmentId]
     );
 
@@ -642,7 +712,12 @@ const getAssignmentSubmissions = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Assignment not found' });
     }
 
-    if (req.user.role !== 'admin' && assignmentCheck.rows[0].teacher_id !== teacherId) {
+    // Verify school access
+    if (userSchoolId && assignmentCheck.rows[0].school_id !== userSchoolId) {
+      return res.status(403).json({ success: false, message: 'Assignment not available for your school' });
+    }
+
+    if (!['admin', 'school_admin'].includes(req.user.role) && assignmentCheck.rows[0].teacher_id !== teacherId) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -690,7 +765,7 @@ const gradeSubmission = async (req, res) => {
 
     const submission = submissionCheck.rows[0];
 
-    if (req.user.role !== 'admin' && submission.teacher_id !== teacherId) {
+    if (!['admin', 'school_admin'].includes(req.user.role) && submission.teacher_id !== teacherId) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -734,6 +809,145 @@ const gradeSubmission = async (req, res) => {
 };
 
 // ============================================
+// DOWNLOAD SUBMISSION FILE (Teacher)
+// ============================================
+const downloadSubmission = async (req, res) => {
+  try {
+    const { submissionId } = req.params;
+    const teacherId = req.user.userId;
+    const userSchoolId = req.user.schoolId;
+
+    console.log('[downloadSubmission] Download request for submission:', submissionId);
+
+    // Get submission with file info and verify teacher owns the assignment
+    const submissionCheck = await db.query(
+      `SELECT s.*, a.teacher_id, a.title as assignment_title,
+              m.school_id, m.name as subject_name,
+              u.first_name, u.last_name
+       FROM assignment_submissions s
+       JOIN assignments a ON s.assignment_id = a.id
+       JOIN modules m ON a.subject_id = m.id
+       JOIN users u ON s.learner_id = u.id
+       WHERE s.id = $1`,
+      [submissionId]
+    );
+
+    if (submissionCheck.rows.length === 0) {
+      console.log('[downloadSubmission] Submission not found');
+      return res.status(404).json({ success: false, message: 'Submission not found' });
+    }
+
+    const submission = submissionCheck.rows[0];
+
+    // Verify school access
+    if (userSchoolId && submission.school_id !== userSchoolId) {
+      console.log('[downloadSubmission] School mismatch');
+      return res.status(403).json({ success: false, message: 'Submission not available for your school' });
+    }
+
+    // Verify teacher owns the assignment or is admin
+    if (!['admin', 'school_admin'].includes(req.user.role) && submission.teacher_id !== teacherId) {
+      console.log('[downloadSubmission] Not authorized');
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    // Check if file exists
+    if (!submission.file_url) {
+      console.log('[downloadSubmission] No file attached to submission');
+      return res.status(404).json({ success: false, message: 'No file attached to this submission' });
+    }
+
+    console.log('[downloadSubmission] Fetching file from:', submission.file_url);
+
+    // Fetch the file from Cloudinary using built-in https
+    const fileUrl = new URL(submission.file_url);
+    const fileBuffer = await new Promise((resolve, reject) => {
+      https.get(fileUrl, (response) => {
+        if (response.statusCode !== 200) {
+          reject(new Error(`Failed to fetch file: ${response.statusCode}`));
+          return;
+        }
+        
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.on('end', () => resolve(Buffer.concat(chunks)));
+        response.on('error', reject);
+      }).on('error', reject);
+    });
+
+    // Determine filename
+    const originalFilename = submission.original_filename || submission.file_name;
+    
+    console.log('[downloadSubmission] Filename sources:', {
+      original_filename: submission.original_filename,
+      file_name: submission.file_name,
+      file_type: submission.file_type,
+      file_url: submission.file_url ? 'present' : 'missing'
+    });
+    
+    let downloadFilename;
+    
+    if (originalFilename && originalFilename.includes('.')) {
+      downloadFilename = originalFilename;
+    } else if (submission.file_type) {
+      const ext = submission.file_type.split('/')[1] || 'file';
+      downloadFilename = `${originalFilename || 'submission'}.${ext}`;
+    } else {
+      // Try to extract extension from file_url as last resort
+      const urlParts = submission.file_url ? submission.file_url.split('.') : [];
+      const urlExt = urlParts.length > 1 ? urlParts[urlParts.length - 1] : null;
+      if (urlExt && urlExt.length <= 5) {
+        downloadFilename = `${originalFilename || 'submission'}.${urlExt}`;
+      } else {
+        downloadFilename = originalFilename || 'submission';
+      }
+    }
+
+    // Create descriptive filename for teacher
+    const studentName = `${submission.first_name || ''}_${submission.last_name || ''}`.trim().replace(/\s+/g, '_');
+    const assignmentName = (submission.assignment_title || 'assignment').replace(/\s+/g, '_');
+    
+    // Clean the filename but preserve the extension
+    const lastDotIndex = downloadFilename.lastIndexOf('.');
+    let baseName, fileExt;
+    if (lastDotIndex > 0) {
+      baseName = downloadFilename.substring(0, lastDotIndex);
+      fileExt = downloadFilename.substring(lastDotIndex + 1);
+    } else {
+      baseName = downloadFilename;
+      fileExt = submission.file_type ? submission.file_type.split('/')[1] : 'file';
+    }
+    
+    // Clean base name (remove special chars but keep it readable)
+    const cleanBaseName = baseName.replace(/[^a-zA-Z0-9\s_-]/g, '').replace(/\s+/g, '_');
+    const cleanExt = fileExt.replace(/[^a-zA-Z0-9]/g, '');
+    const finalFilename = `${cleanBaseName}.${cleanExt}`;
+    
+    // Build descriptive filename: Student_Assignment_Filename.ext
+    const descriptiveFilename = `${studentName}_${assignmentName}_${finalFilename}`;
+    
+    // Encode for Content-Disposition header (handle special chars properly)
+    const encodedFilename = encodeURIComponent(descriptiveFilename);
+
+    console.log('[downloadSubmission] Serving file:', descriptiveFilename);
+
+    // Set headers for download
+    res.setHeader('Content-Type', submission.file_type || 'application/octet-stream');
+    // Use simple filename format - ASCII only to avoid encoding issues
+    const safeFilename = descriptiveFilename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
+
+    // Send the file
+    res.send(fileBuffer);
+
+  } catch (error) {
+    console.error('[downloadSubmission] Error:', error);
+    console.error('[downloadSubmission] Stack:', error.stack);
+    res.status(500).json({ success: false, message: 'Failed to download submission: ' + error.message });
+  }
+};
+
+// ============================================
 // HELPER: Create notifications for assignment
 // ============================================
 const createAssignmentNotifications = async (subjectId, gradeIds, title, message, assignmentId) => {
@@ -769,6 +983,109 @@ const createAssignmentNotifications = async (subjectId, gradeIds, title, message
   }
 };
 
+// ============================================
+// EXTEND ASSIGNMENT DUE DATE
+// ============================================
+const extendDueDate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newDueDate, reason } = req.body;
+    const teacherId = req.user.userId;
+
+    if (!newDueDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'New due date is required'
+      });
+    }
+
+    // Get current assignment
+    const assignmentResult = await db.query(
+      `SELECT a.*, m.name as subject_name, m.id as subject_id
+       FROM assignments a
+       JOIN modules m ON a.subject_id = m.id
+       WHERE a.id = $1`,
+      [id]
+    );
+
+    if (assignmentResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Assignment not found' });
+    }
+
+    const assignment = assignmentResult.rows[0];
+
+    // Verify teacher owns this assignment
+    if (assignment.teacher_id !== teacherId && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    // Store original due date if not already stored
+    const originalDueDate = assignment.original_due_date || assignment.due_date;
+
+    // Update assignment with extension
+    const updateResult = await db.query(
+      `UPDATE assignments 
+       SET due_date = $1,
+           original_due_date = $2,
+           extended_due_date = $1,
+           extended_at = NOW(),
+           extended_by = $3,
+           extension_reason = $4,
+           updated_at = NOW()
+       WHERE id = $5
+       RETURNING *`,
+      [newDueDate, originalDueDate, teacherId, reason || null, id]
+    );
+
+    const updatedAssignment = updateResult.rows[0];
+
+    // Get enrolled students to notify
+    const studentsResult = await db.query(
+      `SELECT DISTINCT lm.learner_id 
+       FROM learner_modules lm
+       WHERE lm.module_id = $1 
+       AND lm.status = 'active'
+       AND ($2 = '{}' OR lm.grade_id = ANY($2))`,
+      [assignment.subject_id, assignment.applicable_grade_ids]
+    );
+
+    const studentIds = studentsResult.rows.map(r => r.learner_id);
+
+    // Create notifications for all enrolled students
+    if (studentIds.length > 0) {
+      const notificationValues = studentIds.map(studentId => {
+        return `('${studentId}', 'deadline_extended', 'Assignment Deadline Extended', 
+                'The deadline for "${assignment.title}" in ${assignment.subject_name} has been extended to ${new Date(newDueDate).toLocaleString()}. ${reason ? 'Reason: ' + reason : ''}', 
+                false, NOW(), '${assignment.subject_id}', '${id}')`;
+      }).join(', ');
+
+      await db.query(
+        `INSERT INTO notifications 
+          (user_id, type, title, message, is_read, created_at, related_subject_id, related_assignment_id)
+         VALUES ${notificationValues}`
+      );
+
+      // Log the extension
+      await db.query(
+        `INSERT INTO due_date_extension_notifications 
+          (item_type, item_id, subject_id, teacher_id, original_due_date, new_due_date, reason, notified_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        ['assignment', id, assignment.subject_id, teacherId, originalDueDate, newDueDate, reason || null, studentIds.length]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: `Due date extended successfully. ${studentIds.length} students notified.`,
+      data: updatedAssignment
+    });
+
+  } catch (error) {
+    console.error('Extend due date error:', error);
+    res.status(500).json({ success: false, message: 'Failed to extend due date' });
+  }
+};
+
 module.exports = {
   createAssignment,
   getAllAssignments,
@@ -779,5 +1096,7 @@ module.exports = {
   getMyAssignments,
   getUpcomingDeadlines,
   getAssignmentSubmissions,
-  gradeSubmission
+  gradeSubmission,
+  downloadSubmission,
+  extendDueDate
 };

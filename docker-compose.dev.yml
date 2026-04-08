@@ -1,0 +1,69 @@
+# E-tab Backend - Docker Compose for Development
+
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: etab-backend-dev
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=development
+      - PORT=5000
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=etab_dev
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - JWT_SECRET=dev_secret_not_for_production
+      - JWT_EXPIRES_IN=7d
+      - EMAIL_SERVICE=ethereal
+      - FRONTEND_URL=http://localhost:5173
+      - CORS_ORIGIN=http://localhost:5173
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - uploads:/app/uploads
+    depends_on:
+      - postgres
+    networks:
+      - etab-dev-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: etab-postgres-dev
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=etab_dev
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - etab-dev-network
+
+  # Adminer for database management (optional)
+  adminer:
+    image: adminer
+    container_name: etab-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - etab-dev-network
+
+volumes:
+  postgres-data:
+  uploads:
+
+networks:
+  etab-dev-network:
+    driver: bridge

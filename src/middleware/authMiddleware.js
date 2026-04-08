@@ -76,8 +76,11 @@ const authenticate = async (req, res, next) => {
     // If not found in admins, check users table (has 'role' column)
     if (!user) {
       userResult = await db.query(
-        `SELECT id, email, role, first_name, last_name, is_active 
-         FROM users WHERE id = $1`,
+        `SELECT u.id, u.email, u.role, u.first_name, u.last_name, u.is_active, u.school_id,
+                s.school_type
+         FROM users u
+         LEFT JOIN schools s ON u.school_id = s.id
+         WHERE u.id = $1`,
         [decoded.userId]
       );
       user = userResult.rows[0];
@@ -102,11 +105,25 @@ const authenticate = async (req, res, next) => {
       role: role, // Use the role determined above
       firstName: user.first_name,
       lastName: user.last_name,
+      schoolId: user.school_id || null, // Multi-tenancy support
+      schoolType: user.school_type || 'high_school', // primary_school, high_school, combined
       isSuperAdmin: user.is_super_admin || false, // Only exists for admins
       table // For debugging: 'admins' or 'users'
     };
 
     console.log('✅ [AUTH] Success - User:', req.user.email, 'Role:', req.user.role, 'Table:', table);
+    
+    // Set RLS context for multi-tenancy
+    if (req.user.schoolId) {
+      try {
+        await db.query(`SET LOCAL app.current_school_id = '${req.user.schoolId}'`);
+        await db.query(`SET LOCAL app.is_super_admin = '${req.user.isSuperAdmin || false}'`);
+        console.log(`🔐 [RLS] Set school context: ${req.user.schoolId}`);
+      } catch (rlsError) {
+        console.error('❌ [RLS] Failed to set context:', rlsError.message);
+      }
+    }
+    
     next();
     
   } catch (error) {

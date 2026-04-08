@@ -4,7 +4,7 @@ const teacherController = require('../controllers/teacherController');
 const { authenticate, restrictTo } = require('../middleware/authMiddleware');
 
 // All routes require authentication and teacher role
-router.use(authenticate, restrictTo('teacher', 'admin'));
+router.use(authenticate, restrictTo('teacher', 'admin', 'school_admin'));
 
 // Get teacher's dashboard stats
 router.get('/dashboard', teacherController.getDashboard);
