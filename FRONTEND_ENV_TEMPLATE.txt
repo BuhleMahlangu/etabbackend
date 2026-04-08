@@ -1,0 +1,10 @@
+# ============================================
+# E-tab Frontend - Production Environment
+# Copy this to etabfrontend/.env.production
+# ============================================
+
+# Backend API URL (will get from Railway after backend deploy)
+VITE_API_URL=https://your-backend-url.up.railway.app
+
+# Or if using Create React App instead of Vite:
+# REACT_APP_API_URL=https://your-backend-url.up.railway.app
