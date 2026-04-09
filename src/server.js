@@ -250,6 +250,29 @@ const publicPath = path.join(__dirname, '..', 'public');
 console.log('[Server] Public folder path:', publicPath);
 console.log('[Server] Public folder exists:', require('fs').existsSync(publicPath));
 
+// List contents of public folder for debugging
+if (require('fs').existsSync(publicPath)) {
+  const files = require('fs').readdirSync(publicPath);
+  console.log('[Server] Public folder contents:', files);
+  
+  const assetsPath = path.join(publicPath, 'assets');
+  if (require('fs').existsSync(assetsPath)) {
+    const assetFiles = require('fs').readdirSync(assetsPath);
+    console.log('[Server] Assets folder contents:', assetFiles);
+  }
+} else {
+  // Try alternate paths
+  const altPaths = [
+    path.join(__dirname, 'public'),
+    path.join(process.cwd(), 'public'),
+    '/app/public'
+  ];
+  console.log('[Server] Trying alternate paths:', altPaths);
+  for (const altPath of altPaths) {
+    console.log('[Server] Checking:', altPath, '- exists:', require('fs').existsSync(altPath));
+  }
+}
+
 // Serve static files with proper MIME types
 app.use('/assets', express.static(path.join(publicPath, 'assets'), {
   maxAge: '1y',
