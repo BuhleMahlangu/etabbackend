@@ -5,7 +5,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "build": "cd ../etabfrontend && npm install && npm run build",
+    "postbuild": "mkdir -p public && cp -r ../etabfrontend/dist/* public/"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

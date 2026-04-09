@@ -240,6 +240,24 @@ app.use('/api/schools', schoolRoutes);
 app.use('/api/download', downloadRoutes);
 app.use('/api/settings', settingsRoutes);
 
+// ============================================
+// SERVE FRONTEND (Production)
+// ============================================
+const path = require('path');
+
+// Serve static files from public directory
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// Serve index.html for all non-API routes (React Router support)
+app.get('*', (req, res) => {
+  // Don't serve index.html for API routes
+  if (req.path.startsWith('/api/') || req.path.startsWith('/health')) {
+    return res.status(404).json({ success: false, message: 'API route not found' });
+  }
+  
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+});
+
 // TEST ENDPOINT - Direct admin subjects test
 app.get('/test-admin-subjects', async (req, res) => {
   try {
@@ -250,11 +268,11 @@ app.get('/test-admin-subjects', async (req, res) => {
   }
 });
 
-// 404 handler
-app.use((req, res) => {
+// API 404 handler (only for API routes that weren't caught)
+app.use('/api/*', (req, res) => {
   res.status(404).json({ 
     success: false, 
-    message: 'Route not found',
+    message: 'API route not found',
     path: req.path 
   });
 });
