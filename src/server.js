@@ -245,17 +245,43 @@ app.use('/api/settings', settingsRoutes);
 // ============================================
 const path = require('path');
 
-// Serve static files from public directory
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// Determine public folder path (works in dev and production)
+const publicPath = path.join(__dirname, '..', 'public');
+console.log('[Server] Public folder path:', publicPath);
+console.log('[Server] Public folder exists:', require('fs').existsSync(publicPath));
+
+// Serve static files with proper MIME types
+app.use('/assets', express.static(path.join(publicPath, 'assets'), {
+  maxAge: '1y',
+  immutable: true
+}));
+
+// Serve other static files from public
+app.use(express.static(publicPath, {
+  maxAge: '1d'
+}));
 
 // Serve index.html for all non-API routes (React Router support)
 app.get('*', (req, res) => {
-  // Don't serve index.html for API routes
-  if (req.path.startsWith('/api/') || req.path.startsWith('/health')) {
-    return res.status(404).json({ success: false, message: 'API route not found' });
+  // Don't serve index.html for API routes or assets
+  if (req.path.startsWith('/api/') || 
+      req.path.startsWith('/health') ||
+      req.path.startsWith('/assets/')) {
+    return res.status(404).json({ success: false, message: 'Not found' });
   }
   
-  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+  const indexPath = path.join(publicPath, 'index.html');
+  console.log('[Server] Serving index.html for:', req.path);
+  
+  if (require('fs').existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).json({ 
+      success: false, 
+      message: 'Frontend not built',
+      path: indexPath 
+    });
+  }
 });
 
 // TEST ENDPOINT - Direct admin subjects test
