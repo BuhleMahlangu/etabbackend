@@ -295,7 +295,7 @@ app.get('/test-admin-subjects', async (req, res) => {
 });
 
 // API 404 handler (only for API routes that weren't caught)
-app.use('/api/*', (req, res) => {
+app.use('/api', (req, res) => {
   res.status(404).json({ 
     success: false, 
     message: 'API route not found',
