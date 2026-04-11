@@ -39,26 +39,39 @@ const app = express();
 // Security middleware
 app.use(helmet());
 
-// CORS - Support multiple origins (PERMISSIVE in development)
-const isDev = process.env.NODE_ENV !== 'production';
-const corsOrigins = process.env.CORS_ORIGIN 
-  ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
-  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:3000'];
+// CORS - Explicitly define allowed origins
+const corsOrigins = [
+  'https://etab.co.za',
+  'https://www.etab.co.za',
+  'https://*.netlify.app',  // Allow any Netlify preview domain
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:3000'
+];
 
-console.log('[CORS] Allowed origins:', corsOrigins, isDev ? '(DEV MODE - allowing all localhost)' : '');
+const isDev = process.env.NODE_ENV !== 'production';
+console.log('[CORS] Allowed origins:', corsOrigins);
+console.log('[CORS] Environment:', isDev ? 'DEVELOPMENT' : 'PRODUCTION');
 
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (mobile apps, curl, etc.)
-    if (!origin) return callback(null, true);
-    
-    // In development, allow ALL origins (permissive for debugging)
-    if (isDev) {
-      console.log('[CORS] DEV MODE - Allowing origin:', origin);
+    if (!origin) {
+      console.log('[CORS] Allowing request with no origin');
       return callback(null, true);
     }
     
-    if (corsOrigins.indexOf(origin) !== -1 || corsOrigins.includes('*')) {
+    // Check if origin is allowed
+    const isAllowed = corsOrigins.some(allowed => {
+      if (allowed.includes('*')) {
+        const regex = new RegExp(allowed.replace('*', '.*'));
+        return regex.test(origin);
+      }
+      return allowed === origin;
+    });
+    
+    if (isAllowed) {
+      console.log('[CORS] Allowed origin:', origin);
       callback(null, true);
     } else {
       console.log('[CORS] Blocked origin:', origin);
